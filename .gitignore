@@ -1,0 +1,33 @@
+# Dependencies and build output
+node_modules/
+.next/
+.turbo/
+.vercel/
+out/
+dist/
+coverage/
+test-results/
+playwright-report/
+next-env.d.ts
+*.tsbuildinfo
+
+# Local configuration and credentials
+.env*
+!.env.example
+
+# Local database and temporary output
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Machine-specific files
+.DS_Store
+Thumbs.db
+Desktop.ini
+AGENTS.md
