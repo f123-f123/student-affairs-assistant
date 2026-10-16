@@ -3,18 +3,21 @@ import { getSupabase } from '@/lib/supabase';
 import { generateEventsIcs } from '@/lib/event-ics';
 import { UUID_RE } from '@/lib/validation';
 import type { StudentEvent } from '@/lib/types';
+import { getCurrentUser } from '@/lib/auth';
+import { unauthorized } from '@/lib/teacher-api';
 
 export const dynamic = 'force-dynamic';
 const headers = { 'Cache-Control': 'no-store' };
 
 export async function GET(request: Request) {
+  const user = await getCurrentUser();
+  if (!user) return unauthorized();
   const params = new URL(request.url).searchParams;
-  const deviceId = params.get('device_id');
   const id = params.get('id');
-  if (!deviceId || !UUID_RE.test(deviceId) || (id && !UUID_RE.test(id))) return NextResponse.json({ error: '设备或事项标识无效' }, { status: 400, headers });
+  if (id && !UUID_RE.test(id)) return NextResponse.json({ error: '事项标识无效' }, { status: 400, headers });
   try {
     const db = getSupabase();
-    let query = db.from('events').select('*').eq('device_id', deviceId).not('deadline', 'is', null).neq('status', 'archived');
+    let query = db.from('events').select('*').eq('device_id', user.id).not('deadline', 'is', null).eq('status', 'active');
     if (id) query = query.eq('id', id);
     const result = await query;
     if (result.error) throw result.error;

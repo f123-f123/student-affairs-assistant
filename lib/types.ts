@@ -7,9 +7,15 @@ export type KnowledgeItem = {
   source_level: number;
   source_name: string;
   source_url: string | null;
+  source_excerpt?: string | null;
+  aliases?: string[];
+  valid_from?: string | null;
+  valid_until?: string | null;
+  version?: number;
+  supersedes?: string | null;
+  status?: 'draft' | 'confirmed' | 'superseded' | 'inactive';
   updated_at: string;
   categories: { name: string } | null;
-  source_type?: 'saved_notice';
 };
 export type Contact = {
   id: string;
@@ -20,7 +26,7 @@ export type Contact = {
   office: string | null;
   office_hours: string | null;
 };
-export type Citation = Pick<KnowledgeItem, 'id' | 'source_name' | 'source_level' | 'updated_at' | 'source_url' | 'source_type'> & { source_text?: string };
+export type Citation = Pick<KnowledgeItem, 'id' | 'source_name' | 'source_level' | 'updated_at' | 'source_url'> & { version: number; question: string; answer: string; source_excerpt: string | null };
 export type AskResponse = {
   answerable: boolean;
   answer?: string;
@@ -44,6 +50,10 @@ export type StudentEvent = {
   source_url: string | null;
   source_text: string;
   publish_date: string | null;
+  source_article_id?: string | null;
+  source_fetched_at?: string | null;
+  source_confirmed_at?: string | null;
+  publish_date_source?: 'page' | 'user' | 'unknown' | null;
   status: 'active' | 'done' | 'archived';
   created_at: string;
   updated_at: string;

@@ -1,12 +1,16 @@
 import { createHash } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
-import { passcodeMatches, signTeacherToken, TEACHER_COOKIE } from '@/lib/teacher-auth';
+import { passcodeMatches } from '@/lib/teacher-auth';
+import { AUTH_COOKIE, SESSION_SECONDS, signSession } from '@/lib/auth-core';
 import { badRequest, noStore, serviceUnavailable } from '@/lib/teacher-api';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(request: Request) {
+  if (process.env.AUTH_MODE !== 'legacy_teacher') return NextResponse.json({ error: '口令兼容演示未启用' }, { status: 403, headers: noStore });
+  const origin = request.headers.get('origin');
+  if (origin && origin !== new URL(request.url).origin) return NextResponse.json({ error: '来源无效' }, { status: 403, headers: noStore });
   let input: unknown;
   try { input = await request.json(); } catch { return badRequest('请求格式无效'); }
   if (!input || typeof input !== 'object' || Array.isArray(input)) return badRequest('请求格式无效');
@@ -14,7 +18,7 @@ export async function POST(request: Request) {
   if (typeof passcode !== 'string' || !passcode) return badRequest('请输入口令');
   const expected = process.env.TEACHER_PASSCODE;
   const secret = process.env.SESSION_SECRET;
-  if (!expected || !secret) return serviceUnavailable();
+  if (!expected || !secret || secret.length < 32) return serviceUnavailable();
   try {
     const db = getSupabase();
     const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
@@ -31,10 +35,11 @@ export async function POST(request: Request) {
     }
     await db.from('teacher_login_attempts').delete().eq('key', key);
     const response = NextResponse.json({ ok: true }, { headers: noStore });
-    response.cookies.set(TEACHER_COOKIE, signTeacherToken(secret), {
+    response.cookies.set(AUTH_COOKIE, signSession('legacy_teacher', 'legacy-teacher', secret), {
       httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production',
-      path: '/', maxAge: 8 * 60 * 60,
+      path: '/', maxAge: SESSION_SECONDS,
     });
+    response.cookies.delete('teacher_session');
     return response;
   } catch { return serviceUnavailable(); }
 }

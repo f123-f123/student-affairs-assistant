@@ -1,18 +1,78 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getLocalDb, migrateChatLogs } from '../lib/local-db';
+import { getLocalDb, migrateChatLogs, migrateEventSourceColumns, migrateLegacyKnowledgeStatus } from '../lib/local-db';
 
 beforeAll(() => { process.env.LOCAL_SQLITE_PATH = ':memory:'; });
 
 describe('本机 SQLite 演示数据', () => {
+  it('已有事项原位补来源字段，重复执行保留旧内容', () => {
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite')!;
+    const raw = new DatabaseSync(':memory:');
+    try {
+      raw.exec('CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL)');
+      raw.prepare('INSERT INTO events(id,title) VALUES (?,?)').run('old-event', '历史事项');
+      migrateEventSourceColumns(raw); migrateEventSourceColumns(raw);
+      expect(raw.prepare('SELECT id,title,source_article_id,source_confirmed_at FROM events').get()).toEqual({ id: 'old-event', title: '历史事项', source_article_id: null, source_confirmed_at: null });
+    } finally { raw.close(); }
+  });
+  it('旧 SQLite 状态约束增量升级后保留原 ID 与引用', () => {
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite')!;
+    const raw = new DatabaseSync(':memory:');
+    const schema = readFileSync(join(process.cwd(), 'local', 'schema.sql'), 'utf8');
+    const legacy = schema.replace("'draft', 'confirmed', 'superseded', 'inactive'", "'draft', 'confirmed', 'superseded'");
+    try {
+      raw.exec(legacy);
+      raw.prepare('INSERT INTO categories(id,name,description) VALUES (?,?,?)').run('category', '测试', '测试');
+      raw.prepare('INSERT INTO knowledge_items(id,category_id,question,answer,source_level,source_name,status) VALUES (?,?,?,?,?,?,?)')
+        .run('item', 'category', '旧问题', '旧答案', 1, '旧来源', 'confirmed');
+      migrateLegacyKnowledgeStatus(raw, schema);
+      raw.prepare("UPDATE knowledge_items SET status = 'inactive' WHERE id = 'item'").run();
+      expect(raw.prepare("SELECT id,status FROM knowledge_items WHERE id='item'").get()).toEqual({ id: 'item', status: 'inactive' });
+      expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally { raw.close(); }
+  });
+  it('草稿发布后可见，旧版本保留，停用后不再参与', async () => {
+    const db = getLocalDb();
+    const categoryId = '10000000-0000-4000-8000-000000000008';
+    const created = await db.from('knowledge_items').insert({ category_id: categoryId, question: '测试知识', answer: '旧答案',
+      source_level: 1, source_name: '测试依据', status: 'draft' }).select('id').single();
+    const id = (created.data as { id: string }).id;
+    expect((await db.from('knowledge_items').select('id').eq('id', id).eq('status', 'confirmed')).data).toEqual([]);
+    await db.from('knowledge_items').update({ answer: '新答案' }).eq('id', id);
+    const stale = await db.rpc('publish_knowledge_item', { p_id: id, p_expected_version: 0 });
+    expect(stale.error?.message).toContain('version_conflict');
+    const current = await db.from('knowledge_items').select('version').eq('id', id).single();
+    const published = await db.rpc('publish_knowledge_item', { p_id: id, p_expected_version: (current.data as { version: number }).version });
+    expect(published.error).toBeNull();
+    const active = await db.from('knowledge_items').select('version,status').eq('id', id).single();
+    expect((active.data as { status: string }).status).toBe('confirmed');
+    expect((active.data as { version: number }).version).toBeGreaterThan(1);
+    const versions = await db.from('knowledge_item_versions').select('version,snapshot').eq('item_id', id);
+    expect((versions.data as unknown[]).length).toBeGreaterThan(0);
+    await db.from('knowledge_items').update({ status: 'inactive' }).eq('id', id);
+    expect((await db.from('knowledge_items').select('id').eq('id', id).eq('status', 'confirmed')).data).toEqual([]);
+  });
+  it('未来生效的替换草稿审核后不立即停用现行知识', async () => {
+    const db = getLocalDb();
+    const categoryId = '10000000-0000-4000-8000-000000000008';
+    const old = await db.from('knowledge_items').insert({ category_id: categoryId, question: '未来替换测试', answer: '现行办法',
+      source_level: 1, source_name: '测试依据', status: 'confirmed' }).select('id').single();
+    const oldId = (old.data as { id: string }).id;
+    const draft = await db.from('knowledge_items').insert({ category_id: categoryId, question: '未来替换测试', answer: '新办法',
+      source_level: 1, source_name: '测试依据', status: 'draft', supersedes: oldId, valid_from: '2099-01-01T00:00:00Z' }).select('id,version').single();
+    const { id, version } = draft.data as { id: string; version: number };
+    expect((await db.rpc('publish_knowledge_item', { p_id: id, p_expected_version: version })).error).toBeNull();
+    expect((await db.from('knowledge_items').select('status').eq('id', oldId).single()).data).toMatchObject({ status: 'confirmed' });
+    expect((await db.from('knowledge_items').select('status').eq('id', id).single()).data).toMatchObject({ status: 'confirmed' });
+  });
   it('导入虚构条目，并只读取 confirmed', async () => {
     const db = getLocalDb();
     const result = await db.from('knowledge_items').select('id,question,status,categories(name)')
       .eq('status', 'confirmed');
     expect(result.error).toBeNull();
     const items = result.data as { question: string; categories: { name: string } }[];
-    expect(items).toHaveLength(15);
+    expect(items.length).toBeGreaterThanOrEqual(15);
     expect(items.find(item => item.question.includes('在读证明'))?.categories.name).toBe('证明开具');
     expect(items.some(item => item.question.includes('缓考申请流程'))).toBe(false);
   });

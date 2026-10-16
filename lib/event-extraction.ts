@@ -1,7 +1,7 @@
 import type { EventDraft, EventMaterial } from './types';
 import { resolveDeadline } from './event-date';
 
-export function parseEventExtraction(raw: string, sourceText: string, publishDate: string, sourceUrl: string | null): EventDraft {
+export function parseEventExtraction(raw: string, sourceText: string, publishDate: string | null, sourceUrl: string | null): EventDraft {
   const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   let data: unknown;
   try { data = JSON.parse(cleaned); } catch { throw new Error('invalid_extraction'); }

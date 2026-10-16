@@ -9,7 +9,7 @@ export default function EventEditor({ value, onChange, confirmed, onConfirm }: {
   const change = (patch: Partial<EventDraft>) => onChange({ ...value, ...patch });
   const sourceVerified = value.deadline_source_text && value.source_text.includes(value.deadline_source_text);
   return <div className="panel space-y-5">
-    <div className="notice notice-warning font-semibold">请对照原通知核对以下内容</div>
+    <div className="notice notice-warning font-semibold">整理草稿 · 请对照原通知核对以下内容</div>
     {value.source_url && <a className="break-all text-sm" href={value.source_url} target="_blank" rel="noreferrer">查看原通知：{value.source_url}</a>}
     <label className="field-label">事项标题<input value={value.title} maxLength={300} onChange={e => change({ title: e.target.value })} className="field" /></label>
     {value.title === '请补充事项标题' && <p className="notice notice-warning">原文片段没有完整标题，请对照原通知补充后保存。</p>}
@@ -23,6 +23,7 @@ export default function EventEditor({ value, onChange, confirmed, onConfirm }: {
         <input type="datetime-local" value={value.deadline ? shanghaiInput(value.deadline) : ''} onChange={e => { change({ deadline: e.target.value ? fromShanghaiInput(e.target.value) : null, deadline_inferred: false }); onConfirm(false); }} className="field" />
       </label>
       {value.deadline && <p className="text-sm">当前：{shanghaiDateTime(value.deadline)}{value.deadline_inferred && <strong className="ml-2" style={{ color: 'var(--error)' }}>相对日期推算，待确认</strong>}</p>}
+      <p className="notice notice-warning">{!value.deadline ? '原文未确认截止时间，请核对后按“无截止时间”保存。' : value.deadline_inferred ? '该时间由相对日期推算，仍需对照原文确认。' : confirmed ? '已由你对照原文确认截止时间。' : '截止时间尚未确认，请对照原文核对。'}</p>
       <label className="field-label">日期所在原文句子<input value={value.deadline_source_text || ''} onChange={e => { change({ deadline_source_text: e.target.value || null }); onConfirm(false); }} className="field" /></label>
       {value.deadline_source_text && <p className="notice notice-warning">{value.deadline_source_text}{!sourceVerified && <b className="ml-2">未在原文找到依据</b>}</p>}
       <label className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" checked={confirmed && !!value.deadline} disabled={!value.deadline || !sourceVerified} onChange={e => onConfirm(e.target.checked)} />我已对照原通知确认截止时间</label>

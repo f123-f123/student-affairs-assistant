@@ -13,24 +13,25 @@ function shanghaiDayMorning(deadline: Date): Date {
 }
 
 export function generateEventsIcs(items: StudentEvent[]): string {
-  const withDeadline = items.filter(item => item.deadline && item.status !== 'archived');
+  const withDeadline = items.filter(item => item.deadline && item.status === 'active');
   if (!withDeadline.length) throw new Error('没有可导出的截止事项');
   const events: EventAttributes[] = withDeadline.map(item => {
     const deadline = new Date(item.deadline!);
     const materials = item.materials.map(material => `${material.done ? '☑' : '☐'} ${material.name}`).join('\n');
     const description = [item.summary, item.eligibility && `适用对象：${item.eligibility}`, item.submit_to && `提交方式：${item.submit_to}`,
       materials && `材料清单：\n${materials}`, item.source_url && `原通知：${item.source_url}`].filter(Boolean).join('\n');
+    const alarms: NonNullable<EventAttributes['alarms']> = [
+      { action: 'display', description: `${item.title}：距截止还有3天`, trigger: { days: 3, before: true } },
+      { action: 'display', description: `${item.title}：距截止还有1天`, trigger: { days: 1, before: true } },
+      { action: 'display', description: `${item.title}：今天截止`, trigger: shanghaiDayMorning(deadline).getTime() },
+    ];
     return {
       uid: `event-${item.id}@student-affairs.local`,
       sequence: Math.floor(new Date(item.updated_at).getTime() / 1000),
       lastModified: new Date(item.updated_at).getTime(),
       start: dateArray(deadline), startInputType: 'utc', startOutputType: 'utc', duration: { minutes: 1 },
       title: item.title, description, url: item.source_url || undefined,
-      alarms: [
-        { action: 'display', description: `${item.title}：距截止还有3天`, trigger: { days: 3, before: true } },
-        { action: 'display', description: `${item.title}：距截止还有1天`, trigger: { days: 1, before: true } },
-        { action: 'display', description: `${item.title}：今天截止`, trigger: shanghaiDayMorning(deadline).getTime() },
-      ],
+      alarms: alarms.filter(alarm => typeof alarm.trigger !== 'number' || alarm.trigger <= deadline.getTime()),
     };
   });
   const { error, value } = createEvents(events, { productId: 'Student Affairs Assistant', calName: '学生事务日程' });
@@ -39,7 +40,7 @@ export function generateEventsIcs(items: StudentEvent[]): string {
   const calendar = new ICAL.Component(ICAL.parse(value));
   const parsed = calendar.getAllSubcomponents('vevent');
   if (parsed.length !== events.length || parsed.some((event, index) =>
-    event.getFirstPropertyValue('uid') !== events[index].uid || event.getAllSubcomponents('valarm').length !== 3)) {
+    event.getFirstPropertyValue('uid') !== events[index].uid || event.getAllSubcomponents('valarm').length !== events[index].alarms?.length)) {
     throw new Error('日历文件校验失败');
   }
   return value;

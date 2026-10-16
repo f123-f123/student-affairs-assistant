@@ -27,5 +27,11 @@ describe('ICS 导出', () => {
   });
   it('没有截止时间的事项不导出', () => {
     expect(() => generateEventsIcs([{ ...item, deadline: null }])).toThrow('没有可导出的截止事项');
+    expect(() => generateEventsIcs([{ ...item, status: 'done' }])).toThrow('没有可导出的截止事项');
+  });
+  it('早于当天九点截止时不生成晚于截止的提醒', () => {
+    const file = generateEventsIcs([{ ...item, deadline: '2026-10-20T00:00:00.000Z' }]);
+    const event = new ICAL.Component(ICAL.parse(file)).getFirstSubcomponent('vevent')!;
+    expect(event.getAllSubcomponents('valarm')).toHaveLength(2);
   });
 });

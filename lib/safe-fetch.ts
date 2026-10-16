@@ -6,6 +6,8 @@ import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 
 export const FETCH_FAILURE = '抓取失败，请粘贴通知文本';
+export const FETCH_TOO_LONG = '通知正文超过20000字，已停止提取；请提供完整原文或较短的单篇文章';
+export const FETCH_UNSUPPORTED = '仅支持公开的静态 HTML 页面；PDF、登录页或动态页面请手动提供原文';
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 
@@ -51,7 +53,7 @@ async function downloadPage(url: URL, address: ResolvedAddress, signal: AbortSig
         return;
       }
       if (status !== 200 || !/^text\/html(?:\s*;|$)/i.test(response.headers['content-type'] || '')) {
-        response.resume(); reject(new Error(FETCH_FAILURE)); return;
+        response.resume(); reject(new Error(status === 200 ? FETCH_UNSUPPORTED : FETCH_FAILURE)); return;
       }
       const chunks: Buffer[] = [];
       let size = 0;
@@ -73,7 +75,7 @@ async function downloadPage(url: URL, address: ResolvedAddress, signal: AbortSig
   });
 }
 
-export async function fetchNotice(input: string, allowedDomains: string[], resolver?: Resolver, downloader: Downloader = downloadPage): Promise<{ sourceText: string; sourceUrl: string }> {
+export async function fetchValidatedHtml(input: string, allowedDomains: string[], resolver?: Resolver, downloader: Downloader = downloadPage): Promise<{ html: string; sourceUrl: string; fetchedAt: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   const timedOut = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error(FETCH_FAILURE)), { once: true }));
@@ -87,13 +89,31 @@ export async function fetchNotice(input: string, allowedDomains: string[], resol
         continue;
       }
       if (response.status !== 200 || !response.html) throw new Error(FETCH_FAILURE);
-      const document = new JSDOM(response.html, { url: url.toString() }).window.document;
-      const article = new Readability(document).parse();
-      const sourceText = article?.textContent?.replace(/\s+/g, ' ').trim() || '';
-      if (sourceText.length < 80) throw new Error(FETCH_FAILURE);
-      return { sourceText: sourceText.slice(0, 20000), sourceUrl: url.toString() };
+      return { html: response.html, sourceUrl: url.toString(), fetchedAt: new Date().toISOString() };
     }
     throw new Error(FETCH_FAILURE);
-  } catch { throw new Error(FETCH_FAILURE); }
+  } catch (error) { throw error instanceof Error && error.message === FETCH_UNSUPPORTED ? error : new Error(FETCH_FAILURE); }
   finally { clearTimeout(timeout); }
+}
+
+export function parseNoticeHtml(html: string, sourceUrl: string): { title: string; sourceText: string; publishedDate: string | null; completeness: 'complete' } {
+  const document = new JSDOM(html, { url: sourceUrl }).window.document;
+  if (document.querySelector('form input[type="password"]')) throw new Error(FETCH_UNSUPPORTED);
+  const dateCandidates = [
+    document.querySelector('meta[property="article:published_time"]')?.getAttribute('content'),
+    document.querySelector('meta[name="datePublished"]')?.getAttribute('content'),
+    document.querySelector('meta[name="publishdate"]')?.getAttribute('content'),
+    document.querySelector('time[pubdate][datetime], time.published[datetime], time[itemprop="datePublished"][datetime]')?.getAttribute('datetime'),
+  ];
+  const publishedDate = dateCandidates.map(value => /^\d{4}-\d{2}-\d{2}/.exec(value || '')?.[0]).find(Boolean) || null;
+  const article = new Readability(document).parse();
+  const sourceText = article?.textContent?.replace(/\s+/g, ' ').trim() || '';
+  if (sourceText.length < 80) throw new Error(FETCH_UNSUPPORTED);
+  if (sourceText.length > 20000) throw new Error(FETCH_TOO_LONG);
+  return { title: article?.title?.trim() || document.title.trim() || '未命名文章', sourceText, publishedDate, completeness: 'complete' };
+}
+
+export async function fetchNotice(input: string, allowedDomains: string[], resolver?: Resolver, downloader: Downloader = downloadPage) {
+  const page = await fetchValidatedHtml(input, allowedDomains, resolver, downloader);
+  return { ...parseNoticeHtml(page.html, page.sourceUrl), sourceUrl: page.sourceUrl, fetchedAt: page.fetchedAt };
 }

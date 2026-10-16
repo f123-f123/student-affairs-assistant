@@ -28,17 +28,18 @@ describe('DeepSeek 模型接口', () => {
     expect(body.messages[0].content).not.toContain('contacts');
     expect(body.messages[0].content).not.toContain('13800000001');
   });
-  it('保存的通知作为独立来源进入模型，不含联系人', async () => {
+  it('模型只收到候选知识，不含个人通知或联系人', async () => {
     vi.stubEnv('LLM_PROVIDER', 'deepseek');
     vi.stubEnv('LLM_API_KEY', 'test-only-key');
     vi.stubEnv('LLM_MODEL', 'deepseek-flash');
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '{}' } }] }) });
     vi.stubGlobal('fetch', fetchMock);
-    await askModel('在哪里报名？', [], [{ id: 'notice-id', category_id: '', question: '报名通知', answer: '在青蓝平台报名。',
-      source_level: 3, source_name: '学生保存的通知', source_url: null, updated_at: '2026-10-13', categories: null, source_type: 'saved_notice' }]);
+    await askModel('在哪里报名？', [], [{ id: 'item-id', category_id: '', question: '报名通知', answer: '在青蓝平台报名。',
+      source_level: 1, source_name: '老师审核', source_url: null, updated_at: '2026-10-13', categories: null }]);
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
     expect(body.messages[1].content).toContain('在青蓝平台报名。');
-    expect(body.messages[1].content).toContain('saved_notices');
+    expect(body.messages[1].content).toContain('knowledge_items');
+    expect(body.messages[1].content).not.toContain('saved_notices');
     expect(body.messages[1].content).not.toContain('contacts');
   });
 });

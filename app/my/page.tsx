@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import SiteHeader from '@/app/components/SiteHeader';
 import { useEffect, useState } from 'react';
-import { getDeviceId } from '@/lib/device';
 
 type Ticket = { id: string; question: string; status: 'open' | 'answered'; teacher_reply: string | null; sedimented: boolean; created_at: string; answered_at: string | null; categories: { name: string } | null };
 
@@ -11,11 +10,12 @@ export default function MyTickets() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [retryKey, setRetryKey] = useState(0);
   useEffect(() => {
     let active = true;
     async function load() {
       try {
-        const response = await fetch(`/api/tickets?device_id=${getDeviceId()}`, { cache: 'no-store' });
+        const response = await fetch('/api/tickets', { cache: 'no-store' });
         if (!response.ok) throw new Error();
         const data = await response.json() as { tickets: Ticket[] };
         if (active) { setTickets(data.tickets); setError(''); setLoading(false); }
@@ -24,10 +24,10 @@ export default function MyTickets() {
     void load();
     const timer = setInterval(() => void load(), 5000);
     return () => { active = false; clearInterval(timer); };
-  }, []);
+  }, [retryKey]);
   return <div className="app-shell"><SiteHeader /><main className="page-content reading-width">
-    <div className="page-head"><p className="eyebrow">问题追踪</p><h1 className="page-title">我的工单</h1><p className="page-description">仅显示此浏览器提交的问题，回复状态每 5 秒更新一次。</p></div>
-    {error && <p role="alert" className="notice notice-error">{error}</p>}
+    <div className="page-head"><p className="eyebrow">问题追踪</p><h1 className="page-title">我的工单</h1><p className="page-description">仅显示当前身份提交的问题，回复状态每 5 秒更新一次。</p></div>
+    {error && <div role="alert" className="notice notice-error mb-4">{error} <button type="button" className="ml-2 underline" onClick={() => { setLoading(true); setRetryKey(key => key + 1); }}>立即重试</button></div>}
     {loading ? <div className="skeleton" role="status" aria-label="正在加载工单" /> : <div className="space-y-4">{tickets.map(ticket => <article key={ticket.id} className="content-card">
       <div className="flex flex-wrap justify-between gap-2"><span className="muted text-sm">{ticket.categories?.name || '综合事务'} · {new Date(ticket.created_at).toLocaleString('zh-CN')}</span>
         <span className={ticket.status === 'answered' ? 'pill' : 'pill pill-warning'}>{ticket.status === 'answered' ? '已回复' : '待回复'}</span></div>
