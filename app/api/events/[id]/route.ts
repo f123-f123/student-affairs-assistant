@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
-import { parseEventInput } from '@/lib/event-input';
+import { parseEventInput, parseEventMaterials } from '@/lib/event-input';
 import { UUID_RE } from '@/lib/validation';
 import { getCurrentUser } from '@/lib/auth';
 import { unauthorized } from '@/lib/teacher-api';
@@ -23,10 +23,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     try { changes = parseEventInput(fields.event); } catch (err) { return error(err instanceof Error ? err.message : '事项内容无效'); }
     if (changes.deadline ? fields.deadline_confirmed !== true : fields.no_deadline_confirmed !== true) return error('请先确认截止时间，或明确选择无截止时间');
   } else if (fields.materials !== undefined) {
-    if (!Array.isArray(fields.materials) || fields.materials.length > 100 || fields.materials.some(item =>
-      !item || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 200 ||
-      typeof item.done !== 'boolean' || typeof item.source_text !== 'string' || item.source_text.length > 1000)) return error('材料内容无效');
-    changes = { materials: fields.materials };
+    try { changes = { materials: parseEventMaterials(fields.materials) }; }
+    catch { return error('材料内容无效'); }
   } else if (fields.status === 'active' || fields.status === 'done' || fields.status === 'archived') {
     changes = { status: fields.status };
   } else return error('没有可更新的内容');

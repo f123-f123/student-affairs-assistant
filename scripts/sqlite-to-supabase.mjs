@@ -6,17 +6,37 @@ const apply = process.argv.includes('--apply');
 const sqliteArg = process.argv.find(arg => arg.startsWith('--sqlite='));
 if (!sqliteArg) throw new Error('用法: node scripts/sqlite-to-supabase.mjs --sqlite=路径 [--apply]');
 const path = resolve(sqliteArg.slice('--sqlite='.length));
-const source = new DatabaseSync(path, { readOnly: true });
 const tables = [
   'categories', 'contacts', 'knowledge_items', 'knowledge_item_versions',
-  'tickets', 'conversations', 'chat_logs', 'events',
+  'tickets', 'conversations', 'chat_logs', 'information_sources', 'source_links',
+  'source_articles', 'source_article_versions', 'events',
 ];
-const jsonColumns = new Set(['aliases', 'snapshot', 'cited_item_ids', 'materials', 'response_json']);
+const jsonColumns = new Set(['aliases', 'snapshot', 'cited_item_ids', 'materials', 'response_json', 'attachments']);
 const boolColumns = new Set(['sedimented', 'answerable', 'deadline_inferred']);
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (apply && (!url || !key)) throw new Error('--apply 需要 SUPABASE_URL 和 SUPABASE_SECRET_KEY（或旧版 SUPABASE_SERVICE_ROLE_KEY）');
 const target = url && key ? createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } }) : null;
+const source = new DatabaseSync(path, { readOnly: true });
+
+async function existingCount(table, rows) {
+  let count = 0;
+  for (let offset = 0; offset < rows.length; offset += 100) {
+    const chunk = rows.slice(offset, offset + 100);
+    if (table === 'knowledge_item_versions') {
+      for (const row of chunk) {
+        const { data, error } = await target.from(table).select('item_id').eq('item_id', row.item_id).eq('version', row.version).maybeSingle();
+        if (error) throw error;
+        if (data) count++;
+      }
+    } else {
+      const { data, error } = await target.from(table).select('id').in('id', chunk.map(row => row.id));
+      if (error) throw error;
+      count += data.length;
+    }
+  }
+  return count;
+}
 
 try {
   for (const table of tables) {
@@ -34,23 +54,7 @@ try {
     }
     const ids = rows.map(row => table === 'knowledge_item_versions' ? `${row.item_id}:${row.version}` : row.id);
     if (new Set(ids).size !== ids.length) throw new Error(`${table}: 源主键重复`);
-    let existing = 0;
-    if (target) {
-      for (let offset = 0; offset < rows.length; offset += 100) {
-        const chunk = rows.slice(offset, offset + 100);
-        if (table === 'knowledge_item_versions') {
-          for (const row of chunk) {
-            const { data, error } = await target.from(table).select('item_id').eq('item_id', row.item_id).eq('version', row.version).maybeSingle();
-            if (error) throw error;
-            if (data) existing++;
-          }
-        } else {
-          const { data, error } = await target.from(table).select('id').in('id', chunk.map(row => row.id));
-          if (error) throw error;
-          existing += data.length;
-        }
-      }
-    }
+    const existing = target ? await existingCount(table, rows) : 0;
     console.log(`${table}: 源 ${rows.length} / 目标已存在 ${target ? existing : '未连接'} / 待导入 ${target ? rows.length - existing : '未核对'}`);
     if (!apply || rows.length === 0) continue;
     const converted = rows.map(row => {
@@ -66,21 +70,7 @@ try {
       });
       if (error) throw error;
     }
-    let verified = 0;
-    for (let offset = 0; offset < rows.length; offset += 100) {
-      const chunk = rows.slice(offset, offset + 100);
-      if (table === 'knowledge_item_versions') {
-        for (const row of chunk) {
-          const { data, error } = await target.from(table).select('item_id').eq('item_id', row.item_id).eq('version', row.version).maybeSingle();
-          if (error) throw error;
-          if (data) verified++;
-        }
-      } else {
-        const { data, error } = await target.from(table).select('id').in('id', chunk.map(row => row.id));
-        if (error) throw error;
-        verified += data.length;
-      }
-    }
+    const verified = await existingCount(table, rows);
     if (verified !== rows.length) throw new Error(`${table}: 数量核对失败 ${verified}/${rows.length}`);
     console.log(`${table}: 已核对 ${verified}/${rows.length} 个原 ID`);
   }

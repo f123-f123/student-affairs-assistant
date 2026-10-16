@@ -11,7 +11,7 @@ type Result = { data: unknown; error: { message: string } | null; count?: number
 type Filter = { column: string; operator: string; value: unknown };
 const tables = new Set(['categories', 'contacts', 'knowledge_items', 'knowledge_item_versions', 'tickets', 'conversations', 'chat_logs', 'teacher_login_attempts', 'events', 'information_sources', 'source_links', 'source_articles', 'source_article_versions']);
 const booleanColumns = new Set(['sedimented', 'answerable', 'deadline_inferred']);
-const jsonColumns = new Set(['cited_item_ids', 'materials', 'response_json', 'aliases', 'snapshot']);
+const jsonColumns = new Set(['cited_item_ids', 'materials', 'response_json', 'aliases', 'snapshot', 'attachments']);
 
 function identifier(value: string): string {
   if (!/^[a-z][a-z0-9_]*$/.test(value)) throw new Error('invalid_column');
@@ -92,7 +92,7 @@ class LocalQuery implements PromiseLike<Result> {
 
   private project(rows: Row[]): Row[] {
     const joinCategory = this.fields.includes('categories(name)');
-    const names = this.fields.replace(/,?categories\(name\),?/, '').split(',').map(field => field.trim()).filter(Boolean);
+    const names = this.fields.replace('categories(name)', '').split(',').map(field => field.trim()).filter(Boolean);
     return rows.map(raw => {
       const row = decode(raw);
       const result: Row = names.includes('*') ? row : Object.fromEntries(names.map(name => [name, row[name]]));
@@ -107,6 +107,10 @@ class LocalQuery implements PromiseLike<Result> {
   private execute(): Result {
     try {
       const where = this.where();
+      let count = this.countRequested && this.action === 'select'
+        ? Number((this.db.prepare(`SELECT count(*) AS total FROM ${identifier(this.table)}${where.sql}`).get(...where.args) as Row).total)
+        : undefined;
+      if (this.head && this.action === 'select') return { data: null, error: null, ...(this.countRequested ? { count } : {}) };
       let rows: Row[];
       if (this.action === 'select') {
         const order = this.ordering.map(({ column, ascending, nullsFirst }) => {
@@ -129,10 +133,11 @@ class LocalQuery implements PromiseLike<Result> {
       } else {
         rows = this.db.prepare(`DELETE FROM ${identifier(this.table)}${where.sql} RETURNING *`).all(...where.args) as Row[];
       }
+      if (this.countRequested && this.action !== 'select') count = rows.length;
       const data = this.head ? null : this.project(rows);
       if (this.one && rows.length > 1) throw new Error('multiple_rows');
       if (this.one === 'single' && !rows.length) throw new Error('no_rows');
-      return { data: this.one ? (data as Row[])[0] ?? null : data, error: null, ...(this.countRequested ? { count: rows.length } : {}) };
+      return { data: this.one && data ? data[0] ?? null : data, error: null, ...(this.countRequested ? { count } : {}) };
     } catch (error) {
       return { data: null, error: { message: error instanceof Error ? error.message : 'sqlite_failed' }, ...(this.countRequested ? { count: null } : {}) };
     }
@@ -198,18 +203,18 @@ class LocalDb {
             const archived = this.db.prepare('SELECT content_hash FROM source_article_versions WHERE article_id = ? AND revision = ?')
               .get(id, current.revision as number) as Row | undefined;
             if (archived && archived.content_hash !== current.content_hash) throw new Error('archive_conflict');
-            this.db.prepare('INSERT OR IGNORE INTO source_article_versions (id,article_id,owner_id,revision,source_text,content_hash,fetched_at) VALUES (?,?,?,?,?,?,?)')
-              .run(randomUUID(), id, ownerId, current.revision as number, current.source_text as string, current.content_hash as string, current.fetched_at as string);
-            this.db.prepare('UPDATE source_articles SET title=?,source_text=?,published_date=?,fetched_at=?,content_hash=?,completeness=?,revision=?,updated_at=? WHERE id=? AND owner_id=?')
+            this.db.prepare('INSERT OR IGNORE INTO source_article_versions (id,article_id,owner_id,revision,source_text,content_hash,fetched_at,attachments,completeness) VALUES (?,?,?,?,?,?,?,?,?)')
+              .run(randomUUID(), id, ownerId, current.revision as number, current.source_text as string, current.content_hash as string, current.fetched_at as string, current.attachments as string, current.completeness as string);
+            this.db.prepare('UPDATE source_articles SET title=?,source_text=?,published_date=?,fetched_at=?,content_hash=?,completeness=?,attachments=?,revision=?,updated_at=? WHERE id=? AND owner_id=?')
               .run(params.p_title as string, params.p_source_text as string, params.p_published_date as string | null,
-                params.p_fetched_at as string, params.p_content_hash as string, params.p_completeness as string,
+                params.p_fetched_at as string, params.p_content_hash as string, params.p_completeness as string, JSON.stringify(params.p_attachments ?? []),
                 Number(current.revision) + 1, new Date().toISOString(), id, ownerId);
           } else {
             id = randomUUID(); status = 'new';
-            this.db.prepare('INSERT INTO source_articles (id,source_id,owner_id,url,title,source_text,published_date,fetched_at,content_hash,completeness) VALUES (?,?,?,?,?,?,?,?,?,?)')
+            this.db.prepare('INSERT INTO source_articles (id,source_id,owner_id,url,title,source_text,published_date,fetched_at,content_hash,completeness,attachments) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
               .run(id, sourceId, ownerId, url, params.p_title as string, params.p_source_text as string,
                 params.p_published_date as string | null, params.p_fetched_at as string,
-                params.p_content_hash as string, params.p_completeness as string);
+                params.p_content_hash as string, params.p_completeness as string, JSON.stringify(params.p_attachments ?? []));
           }
           const title = status === 'unchanged' ? current!.title as string : params.p_title as string;
           this.db.exec('COMMIT');
@@ -286,16 +291,20 @@ function migrateKnowledge(db: DatabaseSyncType) {
   };
   for (const [name, type] of Object.entries(additions)) if (!columns.has(name)) db.exec(`ALTER TABLE knowledge_items ADD COLUMN ${name} ${type}`);
   db.exec("UPDATE knowledge_items SET reviewed_at = updated_at WHERE status = 'confirmed' AND reviewed_at IS NULL");
-  db.exec(`CREATE TRIGGER IF NOT EXISTS knowledge_version_archive AFTER UPDATE ON knowledge_items
+  db.exec(`DROP TRIGGER IF EXISTS knowledge_version_archive;
+    CREATE TRIGGER knowledge_version_archive AFTER UPDATE ON knowledge_items
     WHEN NEW.question IS NOT OLD.question OR NEW.answer IS NOT OLD.answer OR NEW.category_id IS NOT OLD.category_id
       OR NEW.aliases IS NOT OLD.aliases OR NEW.source_name IS NOT OLD.source_name OR NEW.source_url IS NOT OLD.source_url
       OR NEW.source_excerpt IS NOT OLD.source_excerpt OR NEW.valid_from IS NOT OLD.valid_from
       OR NEW.valid_until IS NOT OLD.valid_until OR NEW.status IS NOT OLD.status OR NEW.reviewed_at IS NOT OLD.reviewed_at
+      OR NEW.reviewed_by IS NOT OLD.reviewed_by
     BEGIN
       INSERT OR IGNORE INTO knowledge_item_versions(item_id,version,snapshot)
       VALUES (OLD.id,OLD.version,json_object('id',OLD.id,'version',OLD.version,'question',OLD.question,'answer',OLD.answer,
-        'category_id',OLD.category_id,'aliases',OLD.aliases,'source_name',OLD.source_name,'source_url',OLD.source_url,
-        'source_excerpt',OLD.source_excerpt,'status',OLD.status,'reviewed_at',OLD.reviewed_at,'reviewed_by',OLD.reviewed_by));
+        'category_id',OLD.category_id,'aliases',json(OLD.aliases),'source_name',OLD.source_name,'source_url',OLD.source_url,
+        'source_level',OLD.source_level,'source_excerpt',OLD.source_excerpt,'valid_from',OLD.valid_from,'valid_until',OLD.valid_until,
+        'supersedes',OLD.supersedes,'origin_event_id',OLD.origin_event_id,'created_at',OLD.created_at,'updated_at',OLD.updated_at,
+        'status',OLD.status,'reviewed_at',OLD.reviewed_at,'reviewed_by',OLD.reviewed_by));
       UPDATE knowledge_items SET version = OLD.version + 1 WHERE id = OLD.id;
     END`);
 }
@@ -322,6 +331,31 @@ export function migrateLegacyKnowledgeStatus(db: DatabaseSyncType, schema: strin
   if (violations.length) throw new Error('knowledge_migration_foreign_key_failed');
 }
 
+export function migrateArticleMetadata(db: DatabaseSyncType, schema: string) {
+  const columns = (db.prepare('PRAGMA table_info(source_articles)').all() as { name: string }[]).map(row => row.name);
+  if (!columns.includes('attachments')) db.exec("ALTER TABLE source_articles ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'");
+  const history = new Set((db.prepare('PRAGMA table_info(source_article_versions)').all() as { name: string }[]).map(row => row.name));
+  if (!history.has('attachments')) db.exec("ALTER TABLE source_article_versions ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'");
+  if (!history.has('completeness')) db.exec("ALTER TABLE source_article_versions ADD COLUMN completeness TEXT NOT NULL DEFAULT 'legacy_unknown'");
+  const stored = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='source_articles'").get() as { sql: string };
+  if (stored.sql.includes("'body_only'")) return;
+  const definition = schema.match(/CREATE TABLE IF NOT EXISTS source_articles \([\s\S]*?\n\);/)?.[0];
+  if (!definition) throw new Error('source_article_schema_missing');
+  const names = [...columns.filter(name => name !== 'attachments'), 'attachments'].map(identifier).join(',');
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(definition.replace('CREATE TABLE IF NOT EXISTS source_articles', 'CREATE TABLE source_articles_rebuild'));
+    db.exec(`INSERT INTO source_articles_rebuild (${names}) SELECT ${names} FROM source_articles`);
+    db.exec('DROP TABLE source_articles');
+    db.exec('ALTER TABLE source_articles_rebuild RENAME TO source_articles');
+    db.exec('COMMIT');
+  } catch (cause) { db.exec('ROLLBACK'); throw cause; }
+  finally { db.exec('PRAGMA foreign_keys = ON'); }
+  db.exec(schema);
+  if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('source_article_migration_foreign_key_failed');
+}
+
 export function getLocalDb(): LocalDb {
   if (state.__studentLocalDb) return state.__studentLocalDb;
   const dataDirectory = join(process.cwd(), 'data');
@@ -333,6 +367,7 @@ export function getLocalDb(): LocalDb {
   migrateLegacyKnowledgeStatus(db, schema);
   migrateChatLogs(db);
   migrateKnowledge(db);
+  migrateArticleMetadata(db, schema);
   const count = db.prepare('SELECT count(*) AS n FROM categories').get() as { n: number };
   if (count.n === 0) db.exec(readFileSync(join(process.cwd(), 'supabase', 'seed.sql'), 'utf8'));
   state.__studentLocalDb = new LocalDb(db);

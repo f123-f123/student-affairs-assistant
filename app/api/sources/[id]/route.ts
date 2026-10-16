@@ -5,6 +5,7 @@ import { allowedDomains } from '@/lib/information-sources';
 import { validateFetchTarget } from '@/lib/safe-fetch';
 import { UUID_RE } from '@/lib/validation';
 import { noStore, unauthorized } from '@/lib/teacher-api';
+import { sourceFailure } from '@/lib/source-errors';
 
 export const dynamic = 'force-dynamic';
 type Context = { params: Promise<{ id: string }> };
@@ -21,7 +22,7 @@ export async function PATCH(request: Request, context: Context) {
   const url = typeof input?.url === 'string' ? input.url.trim() : '';
   const kind = input?.kind;
   if (!name || name.length > 100 || url.length > 2000 || (kind !== 'article' && kind !== 'column')) return error('信息源内容无效');
-  try { await validateFetchTarget(url, allowedDomains()); } catch { return error('网址不在允许的公开域名内，或解析不安全'); }
+  try { await validateFetchTarget(url, allowedDomains()); } catch (cause) { return sourceFailure(cause); }
   try {
     const db = getSupabase();
     const previous = await db.from('information_sources').select('url,kind').eq('id', id).eq('owner_id', user.id).maybeSingle();

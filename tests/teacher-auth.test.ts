@@ -9,6 +9,8 @@ describe('统一会话与模拟身份', () => {
   it('只解析服务端预定义身份，不能自行声明老师角色', () => {
     expect(resolveIdentity('mock', 'student-a', env)).toEqual(MOCK_USERS['student-a']);
     expect(resolveIdentity('mock', 'attacker', env)).toBeNull();
+    expect(resolveIdentity('mock', 'toString', env)).toBeNull();
+    expect(resolveIdentity('mock', '__proto__', env)).toBeNull();
     expect(resolveIdentity('real', 'student-a', env)).toBeNull();
   });
   it('过期、篡改与关闭 mock 后令牌无效', () => {
@@ -31,6 +33,7 @@ describe('统一会话与模拟身份', () => {
     expect(passcodeEnabled({ ...passcodeEnv, AUTH_MODE: 'real' })).toBe(false);
     expect(resolveIdentity('passcode', 'teacher', passcodeEnv)?.role).toBe('teacher');
     expect(resolveIdentity('passcode', 'student-a', passcodeEnv)?.role).toBe('student');
+    expect(resolveIdentity('passcode', 'constructor', passcodeEnv)).toBeNull();
     expect(verifySession(signSession('passcode', 'teacher', secret, now), passcodeEnv, now)?.role).toBe('teacher');
     expect(mockEnabled({ ...passcodeEnv, AUTH_MODE: 'mock' })).toBe(false);
   });

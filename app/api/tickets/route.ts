@@ -39,7 +39,8 @@ export async function POST(request: Request) {
       db.from('tickets').select('id', { count: 'exact', head: true }).eq('device_id', user.id).gte('created_at', dayStart),
       db.from('categories').select('id,name'),
     ]);
-    if (minute.error || day.error || categories.error || !categories.data?.length) return serviceUnavailable();
+    if (minute.error || day.error || categories.error) return serviceUnavailable();
+    if (!categories.data?.length) return NextResponse.json({ code: 'CATEGORIES_NOT_INITIALIZED', error: '尚未配置基础分类，请由管理员先初始化分类后再提交工单' }, { status: 503, headers: noStore });
     const limit = ticketLimit(minute.count ?? 0, day.count ?? 0);
     if (limit) return NextResponse.json({ error: limit === 'minute' ? '每分钟最多提交3张工单' : '每天最多提交20张工单', error_type: 'rate_limited' }, { status: 429, headers: noStore });
     const fallback = categories.data.find(c => c.name === '综合事务')?.id;

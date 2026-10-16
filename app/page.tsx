@@ -40,7 +40,7 @@ export default function Home() {
   const [creatingConversation, setCreatingConversation] = useState(false);
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [ticketTarget, setTicketTarget] = useState<{ question: string; categoryId: string } | null>(null);
+  const [ticketTarget, setTicketTarget] = useState<{ question: string; categoryId: string | null } | null>(null);
   const [ticketDetail, setTicketDetail] = useState('');
   const [ticketLoading, setTicketLoading] = useState(false);
   const [ticketError, setTicketError] = useState('');
@@ -272,7 +272,7 @@ export default function Home() {
       {messages.map((message, index) => message.role === 'user'
         ? <div key={index} className="chat-message chat-message-user">{message.text}</div>
         : <div key={index} className="chat-message chat-message-assistant space-y-4">
-          <div className={message.error ? 'notice notice-error' : message.data?.answerable || message.notice ? 'notice' : 'notice notice-warning'} role={message.error ? 'alert' : 'status'}><b>{message.error ? '服务故障' : message.notice ? '提交成功' : message.data?.answerable ? '有依据的回答' : '知识不足'}</b><p className="mt-1 whitespace-pre-wrap">{message.error ?? message.notice ?? (message.data?.answerable ? message.data.answer : fallbackText)}</p></div>
+          <div className={message.error ? 'notice notice-error' : message.data?.answerable || message.notice ? 'notice' : 'notice notice-warning'} role={message.error ? 'alert' : 'status'}><b>{message.error ? '服务故障' : message.notice ? '提交成功' : message.data?.answerable ? '有依据的回答' : '知识不足'}</b><p className="mt-1 whitespace-pre-wrap">{message.error ?? message.notice ?? (message.data?.answerable ? message.data.answer : message.data?.notice || fallbackText)}</p></div>
           {message.data?.answerable && message.data.citations.length > 0 && <div className="flex flex-wrap gap-2 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
             {message.data.citations.map(citation => <div key={citation.id} className="citation-card space-y-2">
               <span className="pill">出处：{citation.source_name} · v{citation.version} · 更新于 {new Date(citation.updated_at).toLocaleDateString('zh-CN')}
@@ -288,7 +288,7 @@ export default function Home() {
             <div className="font-semibold">相关负责人</div>
             {message.data.contacts.length ? message.data.contacts.map(contact => <ContactCard key={contact.id} contact={contact} />) : <div className="muted">暂无负责人信息</div>}
           </div>}
-          {message.data && <button type="button" onClick={() => { setTicketTarget({ question: message.question, categoryId: message.data!.category_id }); setTicketError(''); }} className="button-secondary">{message.data.answerable ? '仍未解决？请老师确认' : '提交工单给老师'}</button>}
+          {message.data?.category_id && <button type="button" onClick={() => { setTicketTarget({ question: message.question, categoryId: message.data!.category_id }); setTicketError(''); }} className="button-secondary">{message.data.answerable ? '仍未解决？请老师确认' : '提交工单给老师'}</button>}
           {message.error && <button type="button" disabled={loading} onClick={() => void submit(message.question)} className="button-secondary">重试提问</button>}
         </div>)}
       {loading && <div className="chat-message chat-message-assistant muted" role="status">正在查找已确认的知识…</div>}

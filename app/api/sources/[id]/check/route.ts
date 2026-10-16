@@ -6,6 +6,7 @@ import { fetchNotice, fetchValidatedHtml } from '@/lib/safe-fetch';
 import { saveSourceArticle } from '@/lib/source-storage';
 import { UUID_RE } from '@/lib/validation';
 import { noStore, unauthorized } from '@/lib/teacher-api';
+import { sourceFailure } from '@/lib/source-errors';
 
 export const dynamic = 'force-dynamic';
 type Context = { params: Promise<{ id: string }> };
@@ -16,11 +17,11 @@ export async function POST(_request: Request, context: Context) {
   if (!user) return unauthorized();
   const { id } = await context.params;
   if (!UUID_RE.test(id)) return error('编号无效');
-  const db = getSupabase();
-  const source = await db.from('information_sources').select('*').eq('id', id).eq('owner_id', user.id).maybeSingle();
-  if (source.error) return error('检查失败', 503);
-  if (!source.data) return error('信息源不存在', 404);
   try {
+    const db = getSupabase();
+    const source = await db.from('information_sources').select('*').eq('id', id).eq('owner_id', user.id).maybeSingle();
+    if (source.error) throw source.error;
+    if (!source.data) return error('信息源不存在', 404);
     let results: { url: string; title: string; status: string }[];
     if (source.data.kind === 'article') {
       const article = await fetchNotice(source.data.url, allowedDomains());
@@ -42,7 +43,8 @@ export async function POST(_request: Request, context: Context) {
         }
       }
     }
-    await db.from('information_sources').update({ last_checked_at: new Date().toISOString() }).eq('id', id).eq('owner_id', user.id);
+    const updated = await db.from('information_sources').update({ last_checked_at: new Date().toISOString() }).eq('id', id).eq('owner_id', user.id);
+    if (updated.error) throw updated.error;
     return NextResponse.json({ results }, { headers: noStore });
-  } catch (cause) { return error(cause instanceof Error ? cause.message : '检查失败', 422); }
+  } catch (cause) { return sourceFailure(cause); }
 }

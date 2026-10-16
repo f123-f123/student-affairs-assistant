@@ -34,8 +34,8 @@ if (provider !== 'supabase') {
     ['teacher_login_attempts', 'key,attempts,window_start'],
     ['information_sources', 'id,owner_id,name,url,kind,last_checked_at'],
     ['source_links', 'id,source_id,owner_id,url,title'],
-    ['source_articles', 'id,source_id,owner_id,url,title,content_hash'],
-    ['source_article_versions', 'id,article_id,owner_id,revision,content_hash'],
+    ['source_articles', 'id,source_id,owner_id,url,title,content_hash,completeness,attachments'],
+    ['source_article_versions', 'id,article_id,owner_id,revision,content_hash,completeness,attachments'],
   ];
   for (const [table, columns] of checks) {
     const { data, error, status } = await db.from(table).select(columns).limit(1);

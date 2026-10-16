@@ -3,15 +3,18 @@ import { MOCK_USERS } from '../lib/auth-core';
 import { getLocalDb } from '../lib/local-db';
 import { parseColumnLinks } from '../lib/information-sources';
 import { saveSourceArticle } from '../lib/source-storage';
-import { contentHash } from '../lib/information-sources';
 
-const state = vi.hoisted(() => ({ user: null as null | { id: string; role: string }, text: '公开通知正文。'.repeat(20), fail: false }));
+const state = vi.hoisted(() => ({ user: null as null | { id: string; role: string }, text: '公开通知正文。'.repeat(20), fail: false, databaseFailure: false }));
 vi.mock('../lib/auth', () => ({ getCurrentUser: async () => state.user }));
-vi.mock('../lib/supabase', () => ({ getSupabase: () => getLocalDb() }));
+vi.mock('../lib/supabase', () => ({ getSupabase: () => {
+  if (state.databaseFailure) throw new Error('database_not_configured');
+  return getLocalDb();
+} }));
 vi.mock('../lib/safe-fetch', () => ({
+  FETCH_FAILURE: '抓取失败，请粘贴通知文本', FETCH_TOO_LONG: '通知正文过长', FETCH_UNSUPPORTED: '不支持的页面',
   validateFetchTarget: async (input: string) => ({ url: new URL(input), address: { address: '8.8.8.8', family: 4 } }),
   fetchNotice: async (url: string) => {
-    if (state.fail) throw new Error('获取失败');
+    if (state.fail) throw new Error('抓取失败，请粘贴通知文本');
     return { title: '公开通知', sourceText: state.text, sourceUrl: url, publishedDate: '2026-10-15', fetchedAt: new Date().toISOString(), completeness: 'complete' };
   },
   fetchValidatedHtml: async (url: string) => ({ html: '<main><a href="/n1">通知一</a><a href="/n2">通知二</a></main>', sourceUrl: url, fetchedAt: new Date().toISOString() }),
@@ -30,6 +33,22 @@ const context = (id: string) => ({ params: Promise.resolve({ id }) });
 beforeAll(() => { process.env.LOCAL_SQLITE_PATH = ':memory:'; });
 
 describe('个人信息源', () => {
+  it('批量获取拒绝 null 请求，数据库未配置时返回 JSON 503', async () => {
+    state.user = MOCK_USERS['student-a'];
+    const id = 'a1000000-0000-4000-8000-000000000001';
+    const malformed = new Request(url(`/api/sources/${id}/articles`), { method: 'POST', body: 'null' });
+    expect((await fetchArticles.POST(malformed, context(id))).status).toBe(400);
+    state.databaseFailure = true;
+    try {
+      for (const response of [
+        await check.POST(request(`/api/sources/${id}/check`, {}), context(id)),
+        await fetchArticles.POST(request(`/api/sources/${id}/articles`, { urls: ['https://school.example/n1'] }), context(id)),
+      ]) {
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: '服务暂时不可用' });
+      }
+    } finally { state.databaseFailure = false; }
+  });
   it('栏目解析只返回正文列表内的同源链接', () => {
     const html = '<nav><a href="/menu">导航</a></nav><main><a href="/a">通知一</a><a href="https://other.example/b">外站</a><a href="/a">重复</a></main>';
     expect(parseColumnLinks(html, 'https://school.example/list')).toEqual([{ url: 'https://school.example/a', title: '通知一' }]);
@@ -95,11 +114,25 @@ describe('个人信息源', () => {
     const fetched = { title: '原文', sourceText: '第一版', sourceUrl: 'https://school.example/retry',
       publishedDate: '2026-10-15', fetchedAt: new Date().toISOString(), completeness: 'complete' as const };
     const first = await saveSourceArticle(ownerId, sourceId, fetched);
+    const stored = await getLocalDb().from('source_articles').select('content_hash').eq('id', first.id).single();
     await getLocalDb().from('source_article_versions').insert({ article_id: first.id, owner_id: ownerId,
-      revision: 1, source_text: fetched.sourceText, content_hash: contentHash(fetched.sourceText), fetched_at: fetched.fetchedAt });
+      revision: 1, source_text: fetched.sourceText, content_hash: (stored.data as { content_hash: string }).content_hash, fetched_at: fetched.fetchedAt });
     const second = await saveSourceArticle(ownerId, sourceId, { ...fetched, sourceText: '第二版' });
     expect(second.status).toBe('updated');
     expect((await saveSourceArticle(ownerId, sourceId, { ...fetched, sourceText: '第二版' })).status).toBe('unchanged');
     expect((await getLocalDb().from('source_article_versions').select('id').eq('article_id', first.id)).data).toHaveLength(1);
+  });
+  it('正文不变但附件变化时保存新版本，并保留上一版未解析附件状态', async () => {
+    const ownerId = MOCK_USERS['student-b'].id;
+    const source = await getLocalDb().from('information_sources').insert({ owner_id: ownerId, name: '附件通知', url: 'https://school.example/attachments', kind: 'article' }).select('id').single();
+    const id = (source.data as { id: string }).id;
+    const fetched = { title: '通知', sourceText: '正文保持不变', sourceUrl: 'https://school.example/attachments', publishedDate: null,
+      fetchedAt: new Date().toISOString(), completeness: 'body_only' as const,
+      attachments: [{ name: '旧申请表.doc', url: 'https://school.example/old.doc', format: 'doc', status: 'unparsed' as const }] };
+    const first = await saveSourceArticle(ownerId, id, fetched);
+    expect((await saveSourceArticle(ownerId, id, fetched)).status).toBe('unchanged');
+    expect((await saveSourceArticle(ownerId, id, { ...fetched, attachments: [{ ...fetched.attachments[0], name: '新申请表.docx', url: 'https://school.example/new.docx', format: 'docx' }] })).status).toBe('updated');
+    const old = await getLocalDb().from('source_article_versions').select('attachments,completeness').eq('article_id', first.id).single();
+    expect(old.data).toEqual({ attachments: fetched.attachments, completeness: 'body_only' });
   });
 });

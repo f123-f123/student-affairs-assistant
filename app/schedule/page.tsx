@@ -5,31 +5,12 @@ import { useCallback, useEffect, useState } from 'react';
 import EventEditor from '@/app/components/EventEditor';
 import SiteHeader from '@/app/components/SiteHeader';
 import { shanghaiDateTime } from '@/lib/event-date';
+import { eventStateLabels, getEventState, matchesScheduleFilter, scheduleFilters, type ScheduleFilter } from '@/lib/schedule';
 import type { EventDraft, EventMaterial, StudentEvent } from '@/lib/types';
 
-function urgency(item: StudentEvent): string {
-  if (!item.deadline || item.status !== 'active') return '';
-  const days = (new Date(item.deadline).getTime() - Date.now()) / 86_400_000;
-  if (days < 0) return 'pill-error';
-  if (days <= 7) return 'pill-warning';
-  return '';
-}
-function deadlineState(item: StudentEvent): string {
-  if (item.status === 'done') return '已完成';
-  if (item.status === 'archived') return '已归档';
-  if (!item.deadline) return '无截止时间';
-  const days = (new Date(item.deadline).getTime() - Date.now()) / 86_400_000;
-  return days < 0 ? '已过期' : days <= 7 ? '7 天内截止' : '进行中';
-}
-type Filter = 'all' | 'soon' | 'overdue' | 'done' | 'archived';
-
 function editable(item: StudentEvent): EventDraft {
-  return {
-    title: item.title, summary: item.summary, eligibility: item.eligibility, deadline: item.deadline,
-    deadline_source_text: item.deadline_source_text, deadline_inferred: item.deadline_inferred,
-    submit_to: item.submit_to, materials: item.materials, source_url: item.source_url,
-    source_text: item.source_text, publish_date: item.publish_date,
-  };
+  const { id, device_id, status, created_at, updated_at, ...draft } = item;
+  return draft;
 }
 
 export default function Schedule() {
@@ -39,7 +20,8 @@ export default function Schedule() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<Filter>('all');
+  const [filter, setFilter] = useState<ScheduleFilter>('all');
+  const [now, setNow] = useState(Date.now);
   const [feedback, setFeedback] = useState('');
   const load = useCallback(async () => {
     const response = await fetch('/api/events', { cache: 'no-store' });
@@ -49,6 +31,12 @@ export default function Schedule() {
     setLoading(false);
   }, []);
   useEffect(() => { if (new URLSearchParams(window.location.search).get('saved') === '1') setFeedback('事项已加入我的日程'); void load().catch(err => { setError(err.message); setLoading(false); }); }, [load]);
+  useEffect(() => {
+    const refresh = () => setNow(Date.now());
+    const timer = setInterval(refresh, 60_000);
+    window.addEventListener('focus', refresh);
+    return () => { clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, []);
 
   async function update(id: string, body: object) {
     if (busy) return;
@@ -79,17 +67,19 @@ export default function Schedule() {
     void update(item.id, { materials });
   }
   const exportUrl = (id?: string) => `/api/events/export${id ? `?id=${id}` : ''}`;
-  const visible = items.filter(item => filter === 'all' || filter === 'done' && item.status === 'done' || filter === 'archived' && item.status === 'archived' || item.status === 'active' && !!item.deadline && (filter === 'overdue' ? new Date(item.deadline).getTime() < Date.now() : filter === 'soon' && new Date(item.deadline).getTime() >= Date.now() && new Date(item.deadline).getTime() <= Date.now() + 7 * 86_400_000));
+  const visible = items.filter(item => matchesScheduleFilter(item, filter, now));
   return <div className="app-shell"><SiteHeader /><main className="page-content reading-width">
     <div className="page-head flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow">我的事项</p><h1 className="page-title">我的日程</h1><p className="page-description">以截止事项为主，逐项核对材料与办理进度。</p></div>
       <div className="flex flex-wrap gap-2"><Link href="/add" className="button-primary">添加事项</Link>{items.some(item => item.deadline && item.status === 'active') && <a href={exportUrl()} className="button-secondary">导出日历 .ics</a>}</div></div>
     {feedback && <p role="status" className="notice mb-4">{feedback}</p>}
     {error && <div role="alert" className="notice notice-error mb-5">{error} <button type="button" className="underline" onClick={() => void load().then(() => setError('')).catch(err => setError(err.message))}>重试</button></div>}
-    {!loading && <div className="filter-row mb-5" role="group" aria-label="筛选事项">{([['all', '全部'], ['soon', '7 天内'], ['overdue', '已过期'], ['done', '已完成'], ['archived', '已归档']] as const).map(([value, label]) => <button key={value} type="button" className={filter === value ? 'button-secondary segment-active' : 'button-secondary'} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}</div>}
+    {!loading && <><div className="filter-row mb-2" role="group" aria-label="筛选事项">{scheduleFilters.map(([value, label]) => <button key={value} type="button" className={filter === value ? 'button-secondary segment-active' : 'button-secondary'} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}（{items.filter(item => matchesScheduleFilter(item, value, now)).length}）</button>)}</div>
+      <p className="muted mb-5 text-sm">“进行中”包含所有未完成、未归档事项；未设置截止时间的事项也可在“无截止时间”查看。“7 天内截止”和“已过期”仅筛选有截止时间的进行中事项。</p></>}
     {loading ? <div className="skeleton" role="status" aria-label="正在加载日程" /> : <div className="space-y-4">{visible.map(item => {
       const done = item.materials.filter(material => material.done).length;
+      const state = getEventState(item, now);
       return <article key={item.id} className="content-card">
-        <div className="flex flex-wrap items-start justify-between gap-2"><h2 className="text-xl font-semibold">{item.title}</h2><span className={`pill ${urgency(item)}`}>{deadlineState(item)}</span></div>
+        <div className="flex flex-wrap items-start justify-between gap-2"><h2 className="text-xl font-semibold">{item.title}</h2><span className={`pill ${state === 'overdue' ? 'pill-error' : state === 'soon' ? 'pill-warning' : ''}`}>{eventStateLabels[state]}</span></div>
         <p className="muted mt-2 text-sm">{item.deadline ? `截止：${shanghaiDateTime(item.deadline)}（上海时间）` : '无截止时间'}{item.deadline_inferred && ' · 由相对日期推算'}</p>
         {(item.publish_date || item.source_fetched_at || item.source_confirmed_at) && <p className="muted mt-1 text-sm">发布时间：{item.publish_date || '未确认'} · 获取时间：{item.source_fetched_at ? shanghaiDateTime(item.source_fetched_at) : '手动录入'} · 确认时间：{item.source_confirmed_at ? shanghaiDateTime(item.source_confirmed_at) : '历史事项未记录'}</p>}
         {item.summary && <p className="mt-2 text-sm">{item.summary}</p>}

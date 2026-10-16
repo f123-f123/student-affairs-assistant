@@ -5,6 +5,21 @@ import type { Category, KnowledgeItem } from '../lib/types';
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe('DeepSeek 模型接口', () => {
+  it.each([
+    [new TypeError('fetch failed'), 'model_request_failed'],
+    [new DOMException('request timed out', 'TimeoutError'), 'model_timeout'],
+  ])('网络故障及超时返回模型错误 %j', async (cause, expected) => {
+    vi.stubEnv('LLM_API_KEY', 'test-only-key'); vi.stubEnv('LLM_MODEL', 'test-model');
+    vi.stubEnv('LLM_PROVIDER', 'deepseek');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(cause));
+    await expect(askModel('问题', [], [])).rejects.toThrow(expected);
+  });
+  it('上游响应损坏时返回稳定的模型响应错误', async () => {
+    vi.stubEnv('LLM_API_KEY', 'test-only-key'); vi.stubEnv('LLM_MODEL', 'test-model');
+    vi.stubEnv('LLM_PROVIDER', 'deepseek');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => { throw new SyntaxError('invalid JSON'); } }));
+    await expect(askModel('问题', [], [])).rejects.toThrow('model_response_failed');
+  });
   it('使用 JSON 模式且模型输入没有联系人', async () => {
     vi.stubEnv('LLM_PROVIDER', 'deepseek');
     vi.stubEnv('LLM_API_KEY', 'test-only-key');

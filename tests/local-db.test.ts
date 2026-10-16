@@ -1,11 +1,55 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getLocalDb, migrateChatLogs, migrateEventSourceColumns, migrateLegacyKnowledgeStatus } from '../lib/local-db';
+import { getLocalDb, migrateArticleMetadata, migrateChatLogs, migrateEventSourceColumns, migrateLegacyKnowledgeStatus } from '../lib/local-db';
 
 beforeAll(() => { process.env.LOCAL_SQLITE_PATH = ':memory:'; });
 
 describe('本机 SQLite 演示数据', () => {
+  it('旧文章约束增量升级保留文章、历史版本及引用，附件状态不伪造为完整', () => {
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite')!;
+    const raw = new DatabaseSync(':memory:');
+    const schema = readFileSync(join(process.cwd(), 'local/schema.sql'), 'utf8');
+    const legacy = schema.replace("completeness IN ('complete','body_only')", "completeness = 'complete'")
+      .replace("  attachments TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(attachments) AND json_type(attachments) = 'array'),\n", '')
+      .replace("  attachments TEXT NOT NULL DEFAULT '[]', completeness TEXT NOT NULL DEFAULT 'legacy_unknown', UNIQUE(article_id,revision)", '  UNIQUE(article_id,revision)');
+    try {
+      raw.exec(legacy);
+      raw.exec("INSERT INTO information_sources(id,owner_id,name,url,kind) VALUES ('source','owner','通知','https://school.example','article')");
+      raw.exec("INSERT INTO source_articles(id,source_id,owner_id,url,title,source_text,fetched_at,content_hash,completeness) VALUES ('article','source','owner','https://school.example','旧通知','旧正文','2026-10-01','hash','complete')");
+      raw.exec("INSERT INTO source_article_versions(id,article_id,owner_id,revision,source_text,content_hash,fetched_at) VALUES ('version','article','owner',1,'旧历史','hash','2026-09-01')");
+      migrateArticleMetadata(raw, schema); migrateArticleMetadata(raw, schema);
+      expect(raw.prepare('SELECT id,source_text,completeness,attachments FROM source_articles').get()).toEqual({ id: 'article', source_text: '旧正文', completeness: 'complete', attachments: '[]' });
+      expect(raw.prepare('SELECT article_id,source_text,completeness FROM source_article_versions').get()).toEqual({ article_id: 'article', source_text: '旧历史', completeness: 'legacy_unknown' });
+      raw.exec("UPDATE source_articles SET completeness='body_only' WHERE id='article'");
+      expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally { raw.close(); }
+  });
+  it('历史知识快照保留有效期、来源关联和数组别名', async () => {
+    const db = getLocalDb();
+    const old = await db.from('knowledge_items').insert({ category_id: '10000000-0000-4000-8000-000000000008',
+      question: '历史快照测试', answer: '旧答案', source_level: 1, source_name: '原始出处', aliases: ['别名'],
+      valid_from: '2026-10-01T00:00:00Z', valid_until: '2026-11-01T00:00:00Z', origin_event_id: 'origin-event', status: 'draft' }).select('id,version').single();
+    const { id, version } = old.data as { id: string; version: number };
+    await db.from('knowledge_items').update({ answer: '新答案' }).eq('id', id);
+    const archived = await db.from('knowledge_item_versions').select('snapshot').eq('item_id', id).eq('version', version).single();
+    expect(archived.error).toBeNull();
+    expect(archived.data).toMatchObject({ snapshot: { aliases: ['别名'], valid_from: '2026-10-01T00:00:00Z',
+      valid_until: '2026-11-01T00:00:00Z', origin_event_id: 'origin-event', answer: '旧答案', source_level: 1 } });
+  });
+  it('精确计数不受 limit 影响，关联字段放在中间仍能正确投影', async () => {
+    const db = getLocalDb();
+    const total = await db.from('categories').select('id', { count: 'exact', head: true });
+    const limited = await db.from('categories').select('id', { count: 'exact' }).limit(1);
+    expect(total.error).toBeNull();
+    expect(total.data).toBeNull();
+    expect(total.count).toBeGreaterThan(1);
+    expect(limited.count).toBe(total.count);
+    expect(limited.data).toHaveLength(1);
+    const joined = await db.from('knowledge_items').select('id,categories(name),question').limit(1).single();
+    expect(joined.error).toBeNull();
+    expect(joined.data).toMatchObject({ id: expect.any(String), question: expect.any(String), categories: { name: expect.any(String) } });
+  });
   it('已有事项原位补来源字段，重复执行保留旧内容', () => {
     const { DatabaseSync } = process.getBuiltinModule('node:sqlite')!;
     const raw = new DatabaseSync(':memory:');

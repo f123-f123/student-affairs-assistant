@@ -1,10 +1,34 @@
 # 学生事务智能助手
 
+## 项目结构与维护约定
+
+| 层次 | 位置 | 职责 |
+| --- | --- | --- |
+| 页面与交互 | `app/**/page.tsx`、`app/components` | 学生问答、个人资料、老师审核与界面状态 |
+| HTTP 接口 | `app/api/**/route.ts` | 服务端身份、数据归属、请求与响应；不信任前端提交的用户 ID |
+| 业务规则 | `lib/*-input.ts`、`knowledge-search.ts`、`answer-validation.ts`、`event-date.ts` | 输入规范、有效知识筛选、回答依据校验和日期推算 |
+| 外部服务与存储 | `lib/llm.ts`、`safe-fetch.ts`、`supabase.ts`、`local-db.ts`、`source-storage.ts` | 模型调用、安全抓取、两种数据库适配及文章版本事务 |
+| 数据结构与验证 | `local/`、`supabase/`、`tests/`、`scripts/` | 本地结构、增量迁移、回归测试和运维诊断 |
+
+知识的主流程是“草稿 → 审核发布 → 有效期检索 → 回答校验 → 引用快照”；私人通知的主流程是“获取原文 → 整理草稿 → 用户确认 → 个人日程”。两者通过老师整理和审核衔接。
+
+新建与编辑知识共用 `lib/knowledge-input.ts`，包括链接、别名、有效期、类别、通知依据和替换关系校验。草稿编辑保留原关联，再核对原文，不能通过清空请求中的关联字段绕过检查。事项创建与材料更新共用 `lib/event-input.ts`。新增规则时优先修改共享校验，避免在不同路由复制实现。
+
+审核发布前再次检查当前草稿及其引用。日期字段拒绝不存在的日期和缺少时区的日期时间；网页发布日期无效时保持未知。`lib/login.ts` 统一口令限流和会话 Cookie 签发，模型超时或网络错误通过 `MODEL_UNAVAILABLE` 与数据库故障区分。SQLite 新生成的知识快照保留有效期、来源关联和数组别名，已有历史快照保持原样。
+
+外部网页请求总时限为 10 秒，单次模型请求时限为 30 秒；通知提取仅在模型空响应或无效提取结果时重试一次。信息源接口区分可识别的抓取失败（422）与服务故障（503），不向客户端透传数据库错误。批量文章先统一核对栏目链接，再以最多两个并发获取；界面按栏目分别保存选择。
+
 ## 对话数据库只读诊断
 
 `DB_PROVIDER=supabase` 时，服务端必须配置 `SUPABASE_URL` 和 `SUPABASE_SECRET_KEY`（或旧版 `SUPABASE_SERVICE_ROLE_KEY`）。缺少密钥会返回稳定的 `DATABASE_CONFIG_MISSING`（HTTP 503），服务端日志只列缺失变量名；不会自动切换 SQLite，也不会生成示例对话。配置完成后运行 `node scripts/check-conversations-schema.mjs`，以真实 GET 只读核对 `public` REST 暴露、对话及依赖表字段；脚本不执行迁移、不写入数据。若返回 `PGRST205`，先确认项目 URL，再在该项目 SQL Editor 运行只读的 `supabase/diagnose_public.sql`：物理表不存在时按迁移顺序补齐，物理表存在时检查 PostgREST schema cache，不要重复初始化。正式数据和演示 seed 分开处理；`seed.sql` 只适用于已确认的空白演示库。迁移后再次运行真实 GET 诊断，并用 `node scripts/check-business-apis.mjs` 验证本地学生登录后的四个业务 API；两项都成功才算数据库可用。
 
 ## 当前身份登录（未接入校园认证）
+
+### 空白数据库的基础分类初始化
+
+正式空库建表后，运行 `node scripts/initialize-categories.mjs` 只读预览，再用 `node scripts/initialize-categories.mjs --apply` 补齐 `lib/base-categories.json` 中的 8 个基础分类。脚本按 ID 或名称跳过已存在分类，不覆盖配置，不导入演示知识、联系人或个人记录；可重复执行。老师随后在知识库页面录入真实依据并审核发布。
+
+没有分类或没有适用的已审核知识属于“知识不足”，问答返回 HTTP 200 并保存真实状态，不再误报数据库故障；分类缺失时不编造分类 ID，也不显示无法提交的工单按钮。单独调用工单接口时会收到 `CATEGORIES_NOT_INITIALIZED`，初始化分类后即可正常提交。空库不会调用模型补造办事规定。
 
 `AUTH_MODE=passcode`（或在保留旧配置时留空）且设置服务端 `TEACHER_PASSCODE` 与长度至少 32 字符的 `SESSION_SECRET` 后，`/login` 提供账号与口令表单。评估账号 `student-a` 和 `student-b` 留空口令进入各自学生工作区；老师可填任意账号及 `TEACHER_PASSCODE` 进入老师工作台。`AUTH_MODE=mock` 且未配置 `TEACHER_PASSCODE` 时，登录页改为固定的学生 A、学生 B、老师选择框；此入口默认仅限本地，远程受控评估还需 `MOCK_AUTH_ALLOW_REMOTE=true`。两种模式均明确标注“模拟接入，仅用于评估”；未启用的模式不会自动回退。账号仅选择固定测试身份，不能提交任意用户 ID 或自行声明角色。服务端验证口令后才签发老师会话，错误口令不会退回学生身份。校园认证端点尚未接入，不要输入校园账号、密码或验证码。登录使用有效期 8 小时的签名 httpOnly Cookie；退出和切换身份会清理前端当前对话并整页重载。固定评估账号没有学生密码，只适用于本地或受控评估环境，不适合公开部署。
 
@@ -24,13 +48,37 @@ SQLite 模式下 `SUPABASE_URL`、`SUPABASE_SECRET_KEY` 可留空。运行 `npm 
 
 ## 改用 Supabase 时建表与导入数据
 
-新 Supabase 项目在 SQL Editor 依次执行 `supabase/schema.sql`、`supabase/migration_phase2.sql`、`supabase/migration_phase3.sql`、`supabase/migration_chat_history.sql`、`supabase/migration_conversations.sql`、`supabase/migration_knowledge_library.sql`、`supabase/migration_knowledge_publish_version.sql`、`supabase/migration_information_sources.sql`、`supabase/migration_future_knowledge_effective.sql`、`supabase/migration_source_article_atomic.sql`。已有数据库只运行缺失迁移，再执行最后两个新增迁移；均为可重复执行的增量脚本，不清表。`migration_future_knowledge_effective.sql` 会把旧发布函数误停用、但替换知识尚未生效的原条目恢复为 confirmed；请先核对目标知识记录。`migration_source_article_atomic.sql` 安装文章版本的事务 RPC，应用更新前必须部署，否则信息源抓取会报错而不会回退到非事务写入。**正式环境不要执行 `supabase/seed.sql`**；仅空白演示环境可手动导入。旧的 confirmed 知识保留，审核时间回填为旧更新时间，审核人保持空白，不能将其解释为某位老师审核。服务端使用 Secret key（或旧版 service_role key），所有老师写接口仍校验老师 cookie；迁移只撤销 anon/authenticated 对本应用业务表和函数的直接权限，并开启相应 RLS，不触碰 `public` 下其他应用对象。
+新 Supabase 项目在 SQL Editor 依次执行 `supabase/schema.sql`、`supabase/migration_phase2.sql`、`supabase/migration_phase3.sql`、`supabase/migration_chat_history.sql`、`supabase/migration_conversations.sql`、`supabase/migration_knowledge_library.sql`、`supabase/migration_knowledge_publish_version.sql`、`supabase/migration_information_sources.sql`、`supabase/migration_future_knowledge_effective.sql`、`supabase/migration_source_article_atomic.sql`、`supabase/migration_notice_attachments.sql`。已有数据库只运行缺失迁移；均为可重复执行的增量脚本，不清表。`migration_future_knowledge_effective.sql` 会把旧发布函数误停用、但替换知识尚未生效的原条目恢复为 confirmed；请先核对目标知识记录。`migration_source_article_atomic.sql` 安装文章版本的事务 RPC，应用更新前必须部署，否则信息源抓取会报错而不会回退到非事务写入。**正式环境不要执行 `supabase/seed.sql`**；仅空白演示环境可手动导入。旧的 confirmed 知识保留，审核时间回填为旧更新时间，审核人保持空白，不能将其解释为某位老师审核。服务端使用 Secret key（或旧版 service_role key），所有老师写接口仍校验老师 cookie；迁移只撤销 anon/authenticated 对本应用业务表和函数的直接权限，并开启相应 RLS，不触碰 `public` 下其他应用对象。
 
 ### SQLite → Supabase
 
-先在目标项目执行上述 SQL 迁移，再在 PowerShell 设置 `SUPABASE_URL` 与 `SUPABASE_SECRET_KEY` 环境变量（旧版 `SUPABASE_SERVICE_ROLE_KEY` 也可用）。运行 `node scripts/sqlite-to-supabase.mjs --sqlite=E:\\path\\to\\demo.sqlite` 预览源表数量、目标已存在数量与待导入数量；不设置目标配置也能离线预览源数量。核对后附加 `--apply` 才写入。脚本只读打开 SQLite，按依赖顺序导入、保留原 UUID，冲突时跳过目标已有 ID 而不覆盖，并逐表核对所有源 ID 的存在数量。重复执行不会产生重复行。目标有同 ID 但内容不同的记录会保留目标内容，请人工审查这类冲突；不迁移登录限流表。迁移正式数据前备份两端数据库。2026-10-15，项目 `ujbflooavhhbtdezrteo` 的八个结构脚本已由项目维护者在 SQL Editor 执行；随后 12 张业务表真实 GET 及学生登录后的四个业务 API 均返回 200。各业务列表目前为 0 条；尚未导入 SQLite 数据或执行演示 seed。
+先在目标项目执行上述 SQL 迁移，再在 PowerShell 设置 `SUPABASE_URL` 与 `SUPABASE_SECRET_KEY` 环境变量（旧版 `SUPABASE_SERVICE_ROLE_KEY` 也可用）。运行 `node scripts/sqlite-to-supabase.mjs --sqlite=E:\\path\\to\\demo.sqlite` 预览源表数量、目标已存在数量与待导入数量；不设置目标配置也能离线预览源数量。核对后附加 `--apply` 才写入。脚本只读打开 SQLite，按依赖顺序导入、保留原 UUID，冲突时跳过目标已有 ID 而不覆盖，并逐表核对所有源 ID 的存在数量。迁移范围包含个人信息源、栏目链接、文章快照和历史版本，并先于关联事项导入。重复执行不会产生重复行。目标有同 ID 但内容不同的记录会保留目标内容，请人工审查这类冲突；不迁移登录限流表。迁移正式数据前备份两端数据库。2026-10-15，项目 `ujbflooavhhbtdezrteo` 的八个结构脚本已由项目维护者在 SQL Editor 执行；随后 12 张业务表真实 GET 及学生登录后的四个业务 API 均返回 200。各业务列表目前为 0 条；尚未导入 SQLite 数据或执行演示 seed。
 
 ## 配置和启动
+
+### 抓取诊断、白名单与 Fake-IP
+
+本机已将 `yunfeng.zju.edu.cn` 加入 `ALLOWED_FETCH_DOMAINS`。空白名单会返回 `FETCH_ALLOWLIST_EMPTY`，未允许的域名返回 `FETCH_DOMAIN_NOT_ALLOWED`；收藏网址和重定向不能扩展白名单。
+
+默认 `FETCH_DNS_MODE=system`。系统 DNS 返回私网、回环或 `198.18.0.0/15` 等保留地址时返回 `FETCH_DNS_NON_PUBLIC`，不发起目标连接，也不自动切换解析器。Fake-IP 环境可显式配置 `FETCH_DNS_MODE=doh`、`FETCH_DOH_PROVIDER=alidns`（也支持 `cloudflare`）。本机已明确启用 alidns DoH。解析请求使用预定义 HTTPS 域名和固定公网引导 IP，验证 DNS 响应的查询域名、类型及 CNAME 链；所有目标 A/AAAA 地址均须通过公网检查。每次重定向重新校验，目标连接固定到已验证 IP，Host/SNI 与 TLS 证书验证保持原域名。应用不读取系统代理，不通过代理委托未经校验的目标解析；若公网 IP 路由仍不可达，会明确报告连接失败。
+
+已登录用户可 `POST /api/sources/diagnose`，JSON 为 `{"url":"https://yunfeng.zju.edu.cn/on/2026/1013/c53544a3213848/page.psp"}`。此接口调用与信息源保存、通知整理相同的 `fetchNotice`，返回最终地址、HTTP 状态、DNS 模式、每跳固定 IP、正文长度及附件清单；不写库、不调用模型，也不下载附件。主要错误码：
+
+| 错误码 | 含义 |
+| --- | --- |
+| `FETCH_ALLOWLIST_EMPTY` / `FETCH_DOMAIN_NOT_ALLOWED` | 白名单未配置 / 域名不允许 |
+| `FETCH_DNS_CONFIG` / `FETCH_DNS_FAILED` | DNS 配置无效 / 解析失败 |
+| `FETCH_DNS_NON_PUBLIC` | 含非公网或保留地址，继续拦截 |
+| `FETCH_NETWORK_FAILED` / `FETCH_HTTP_FAILED` | 公网连接失败 / 上游 HTTP 非成功 |
+| `FETCH_TIMEOUT` / `FETCH_REDIRECT_LIMIT` | 总时限 10 秒 / 重定向超限 |
+| `FETCH_UNSUPPORTED` / `FETCH_TOO_LARGE` / `FETCH_TOO_LONG` | 非支持页面 / 响应超限 / 正文超长 |
+| `SOURCE_SCHEMA_MIGRATION_REQUIRED` | 抓取存储所需附件字段或 RPC 未部署，须先执行增量迁移 |
+
+网页快照标记为 `body_only`，不代表整份通知资料完整。DOC、DOCX 等附件只识别名称、URL、格式并保存 `unparsed` 状态，既不下载，也不用于模型整理；列表、文章预览及事项整理均提示人工核对附件。附件清单变化会创建文章新版本。历史 `complete` 仅表示旧版本保存了网页正文，界面明确标记附件覆盖未知，不补造完整性结论。
+
+**已有 Supabase 必须先执行 `supabase/migration_notice_attachments.sql`**（接在 `migration_source_article_atomic.sql` 后），安装附件字段、状态约束及兼容默认参数的新版事务 RPC，再部署应用；应用不会在迁移缺失时回退到丢失附件的写入。SQLite 首次访问自动增量升级，保留原文章、历史版本及引用。
+
+构建并启动本地应用后，可运行 `node scripts/check-notice-fetch.mjs --base=http://127.0.0.1:3100` 验收上述真实网址，将结果保存到 `artifacts/notice-fetch-diagnostic.json`。脚本默认只登录本地评估身份并调用只读诊断，不写业务数据；附加 `--system-base`、`--empty-base` 可检查分别启动的系统 DNS、空白名单实例。`--with-isolated-storage` 仅供显式使用 `DB_PROVIDER=sqlite`、`LOCAL_SQLITE_PATH=:memory:` 且关闭模型密钥的独立实例使用，验证保存、重抓去重和附件状态传递；不得对正式数据库使用该选项。`--supabase-base` 只读检查配置中 Supabase 的附件迁移状态。
 
 复制 `.env.example` 为 `.env.local`。使用 Supabase 时填入 Project URL（形如 `https://<project-ref>.supabase.co`）和 Secret key（`sb_secret_...`）；当前服务端连接不使用 Publishable key 或 JWKS URL。DeepSeek 使用 Chat Completions 的 JSON 模式；如使用 Anthropic，改为 `LLM_PROVIDER=anthropic` 并填写对应模型名和密钥。设置 `ALLOWED_FETCH_DOMAINS`，例如 `school.edu.cn,notice.school.edu.cn`。`SESSION_SECRET` 用于签名会话，`TEACHER_PASSCODE` 用于老师身份验证。所有变量仅供服务端读取，不添加 `NEXT_PUBLIC_` 前缀。
 

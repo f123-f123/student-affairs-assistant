@@ -47,8 +47,8 @@ export function mockEndpointEnabled(hostname: string, env: AuthConfig = process.
 }
 
 export function resolveIdentity(source: string, subject: string, env: AuthConfig = process.env): CurrentUser | null {
-  if (source === 'passcode' && passcodeEnabled(env)) return PASSCODE_USERS[subject] ?? null;
-  if (source === 'mock' && mockEnabled(env)) return MOCK_USERS[subject] ?? null;
+  if (source === 'passcode' && passcodeEnabled(env)) return Object.hasOwn(PASSCODE_USERS, subject) ? PASSCODE_USERS[subject] : null;
+  if (source === 'mock' && mockEnabled(env)) return Object.hasOwn(MOCK_USERS, subject) ? MOCK_USERS[subject] : null;
   if (source === 'legacy_teacher' && env.AUTH_MODE === 'legacy_teacher' && subject === 'legacy-teacher' &&
       !!env.SESSION_SECRET && env.SESSION_SECRET.length >= 32) return LEGACY_TEACHER;
   return null;

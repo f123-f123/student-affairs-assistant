@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import SiteHeader from '@/app/components/SiteHeader';
 
 type Category = { id: string; name: string };
-type Item = { id: string; category_id: string; question: string; answer: string; source_name: string; source_level: number; source_url: string | null; source_excerpt: string | null; aliases: string[]; valid_from: string | null; valid_until: string | null; status: string; version: number; reviewed_at: string | null; reviewed_by: string | null; updated_at: string; categories: { name: string } | null };
+type Item = { id: string; category_id: string; question: string; answer: string; source_name: string; source_level: number; source_url: string | null; source_excerpt: string | null; aliases: string[]; valid_from: string | null; valid_until: string | null; supersedes: string | null; origin_event_id: string | null; status: string; version: number; reviewed_at: string | null; reviewed_by: string | null; updated_at: string; categories: { name: string } | null };
 
 export default function TeacherKnowledge() {
   const [categories, setCategories] = useState<Category[]>([]);
@@ -72,7 +72,8 @@ export default function TeacherKnowledge() {
     finally { setSaving(false); }
   }
   function fill(item: Item, replace = false) {
-    setEditing(replace ? null : item); setSupersedes(replace ? item.id : ''); setCategoryId(item.category_id);
+    setEditing(replace ? null : item); setSupersedes(replace ? item.id : item.supersedes || ''); setCategoryId(item.category_id);
+    setOriginEventId(item.origin_event_id || '');
     setQuestion(item.question); setAnswer(item.answer); setSourceName(item.source_name); setSourceUrl(item.source_url || '');
     setSourceExcerpt(item.source_excerpt || ''); setAliases((item.aliases || []).join('，'));
     const localTime = (value: string | null) => value ? new Date(new Date(value).getTime() - new Date(value).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
@@ -99,7 +100,7 @@ export default function TeacherKnowledge() {
       <label className="field-label">出处名称<input className="field" value={sourceName} onChange={event => setSourceName(event.target.value)} maxLength={200} required /></label>
       <label className="field-label">原文依据<textarea className="field" value={sourceExcerpt} onChange={event => setSourceExcerpt(event.target.value)} maxLength={10000} rows={4} /></label>
       <label className="field-label">别名（逗号分隔）<input className="field" value={aliases} onChange={event => setAliases(event.target.value)} /></label>
-      <label className="field-label">学生事项 ID（从通知整理时填写）<input className="field" value={originEventId} onChange={event => setOriginEventId(event.target.value)} /></label>
+      <label className="field-label">学生事项 ID（从通知整理时填写）<input className="field" value={originEventId} disabled={!!editing} onChange={event => setOriginEventId(event.target.value)} /></label>
       <div className="grid gap-3 sm:grid-cols-2"><label className="field-label">生效时间<input className="field" type="datetime-local" value={validFrom} onChange={event => setValidFrom(event.target.value)} /></label><label className="field-label">失效时间<input className="field" type="datetime-local" value={validUntil} onChange={event => setValidUntil(event.target.value)} /></label></div>
       <p className="muted text-sm">请核对办理规则，并删除姓名、学号、电话等个人信息。该条目会标记为“老师确认”。</p>
       <button type="submit" className="button-primary" disabled={loading || saving || !categoryId || !question.trim() || !answer.trim()}>{saving ? '保存中…' : '保存草稿'}</button>

@@ -1,0 +1,85 @@
+{
+  "target": "https://yunfeng.zju.edu.cn/on/2026/1013/c53544a3213848/page.psp",
+  "checked_at": "2026-10-16T14:28:20.539Z",
+  "application": "next start (production build)",
+  "scenarios": [
+    {
+      "scenario": "empty allowlist",
+      "status": 503,
+      "error": "服务端未配置信息源域名白名单",
+      "code": "FETCH_ALLOWLIST_EMPTY",
+      "stage": "allowlist"
+    },
+    {
+      "scenario": "system DNS with Fake-IP",
+      "status": 422,
+      "error": "域名解析到非公网地址；若使用 Fake-IP 代理，请显式配置 DoH，不能放行保留地址",
+      "code": "FETCH_DNS_NON_PUBLIC",
+      "stage": "dns",
+      "details": {
+        "addresses": [
+          "198.18.1.4"
+        ]
+      }
+    },
+    {
+      "scenario": "explicit trusted DoH with public-IP pinning",
+      "status": 200,
+      "code": "FETCH_OK",
+      "title": "【SQTP】云峰学园关于开展2026-2027学年“大学生素质训练项目（SQTP）”工作的通知",
+      "text_length": 1697,
+      "completeness": "body_only",
+      "warning": "仅已提取网页正文；附件尚未解析，整份通知资料不完整，请打开附件人工核对。",
+      "attachments": [
+        {
+          "name": "附件1：求是学院2026-2027学年SQTP选题指南.docx",
+          "url": "https://yunfeng.zju.edu.cn/_upload/article/files/82/fe/cf93dc2a44e389ba9acd34ca7a5e/c5277d86-cd37-45ec-87a2-bac10c8e6118.docx",
+          "format": "docx",
+          "status": "unparsed"
+        },
+        {
+          "name": "附件2：求是学院2026-2027学年SQTP立项可行性报告和申请表.doc",
+          "url": "https://yunfeng.zju.edu.cn/_upload/article/files/82/fe/cf93dc2a44e389ba9acd34ca7a5e/6ded9d35-2616-405c-a36c-bf351847477f.doc",
+          "format": "doc",
+          "status": "unparsed"
+        }
+      ],
+      "diagnostics": {
+        "dns_mode": "doh",
+        "doh_provider": "alidns",
+        "http_status": 200,
+        "hops": [
+          {
+            "host": "yunfeng.zju.edu.cn",
+            "address": "210.32.8.132"
+          }
+        ]
+      }
+    }
+  ],
+  "storage_chain": {
+    "database": "isolated SQLite :memory:",
+    "create": 201,
+    "check": 200,
+    "list": 200,
+    "detail": 200,
+    "repeat_check": "unchanged",
+    "saved_attachment_count": 2,
+    "extraction_without_model": {
+      "status": 503,
+      "error_type": "extract_failed",
+      "completeness": "body_only",
+      "attachments_preserved": true
+    },
+    "remote_database_written": false,
+    "attachments_downloaded": false,
+    "model_called": false
+  },
+  "supabase_read_only_check": {
+    "status": 503,
+    "code": "SOURCE_SCHEMA_MIGRATION_REQUIRED",
+    "migration_required": true,
+    "migration": "supabase/migration_notice_attachments.sql",
+    "database_written": false
+  }
+}

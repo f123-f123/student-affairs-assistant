@@ -5,7 +5,10 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import EventEditor from '@/app/components/EventEditor';
 import SiteHeader from '@/app/components/SiteHeader';
-import type { EventDraft } from '@/lib/types';
+import NoticeCoverage from '@/app/components/NoticeCoverage';
+import type { EventDraft, NoticeAttachment } from '@/lib/types';
+
+type SourceInfo = { published_date: string | null; publish_date_source: string; fetched_at: string | null; completeness?: string; attachments?: NoticeAttachment[] };
 
 export default function AddEvent() {
   const router = useRouter();
@@ -13,7 +16,7 @@ export default function AddEvent() {
   const [url, setUrl] = useState('');
   const [text, setText] = useState('');
   const [publishDate, setPublishDate] = useState('');
-  const [sourceInfo, setSourceInfo] = useState<{ published_date: string | null; publish_date_source: string; fetched_at: string | null } | null>(null);
+  const [sourceInfo, setSourceInfo] = useState<SourceInfo | null>(null);
   const [sourceArticleId, setSourceArticleId] = useState<string | null>(null);
   const [articlePublishDate, setArticlePublishDate] = useState('');
   const [draft, setDraft] = useState<EventDraft | null>(null);
@@ -26,8 +29,8 @@ export default function AddEvent() {
     const linked = params.get('url');
     if (linked) { setMode('url'); setUrl(linked); }
     const articleId = params.get('article_id');
-    if (articleId) void fetch(`/api/sources/articles/${encodeURIComponent(articleId)}`, { cache: 'no-store' }).then(response => response.json()).then((result: { article?: { id: string; source_text: string; published_date: string | null; fetched_at: string } }) => {
-      if (result.article) { setMode('text'); setText(result.article.source_text); setPublishDate(result.article.published_date || ''); setArticlePublishDate(result.article.published_date || ''); setSourceArticleId(result.article.id); setSourceInfo({ published_date: result.article.published_date, publish_date_source: result.article.published_date ? 'page' : 'unknown', fetched_at: result.article.fetched_at }); }
+    if (articleId) void fetch(`/api/sources/articles/${encodeURIComponent(articleId)}`, { cache: 'no-store' }).then(response => response.json()).then((result: { article?: { id: string; source_text: string; published_date: string | null; fetched_at: string; completeness: string; attachments: NoticeAttachment[] } }) => {
+      if (result.article) { setMode('text'); setText(result.article.source_text); setPublishDate(result.article.published_date || ''); setArticlePublishDate(result.article.published_date || ''); setSourceArticleId(result.article.id); setSourceInfo({ published_date: result.article.published_date, publish_date_source: result.article.published_date ? 'page' : 'unknown', fetched_at: result.article.fetched_at, completeness: result.article.completeness, attachments: result.article.attachments }); }
     }).catch(() => setError('文章加载失败，请返回信息源重试'));
   }, []);
   async function extract() {
@@ -38,11 +41,11 @@ export default function AddEvent() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
         body: JSON.stringify(sourceArticleId ? { article_id: sourceArticleId, publish_date: publishDate !== articlePublishDate ? publishDate : undefined } : mode === 'url' ? { url, publish_date: publishDate } : { text, publish_date: publishDate }),
       });
-      const result = await response.json() as { draft?: EventDraft; source?: typeof sourceInfo; error?: string };
-      if (!response.ok || !result.draft) throw new Error(result.error || '提取失败');
+      const result = await response.json() as { draft?: EventDraft; source?: typeof sourceInfo; error?: string; code?: string };
+      if (result.source) setSourceInfo(result.source);
+      if (!response.ok || !result.draft) throw new Error(`${result.code ? `[${result.code}] ` : ''}${result.error || '提取失败'}`);
       setDraft(result.draft);
       if (sourceArticleId) setText(result.draft.source_text);
-      setSourceInfo(result.source || null);
       setMobileView('draft');
     } catch (err) { setError(err instanceof Error ? err.message : '提取失败'); }
     finally { setLoading(false); }
@@ -73,6 +76,7 @@ export default function AddEvent() {
       <label className="field-label">发布日期（依据原文填写，未知可留空）<input type="date" value={publishDate} onChange={e => setPublishDate(e.target.value)} className="field max-w-xs" /></label>
       <button type="button" disabled={loading || (mode === 'url' ? !url.trim() : !text.trim())} onClick={() => void extract()} className={draft ? 'button-secondary' : 'button-primary'}>{loading ? '处理中…' : draft ? '重新提取' : '提取事项'}</button>
     </div>
+    {sourceInfo && sourceInfo.completeness !== 'manual_text' && <NoticeCoverage attachments={sourceInfo.attachments} legacy={sourceInfo.completeness !== 'body_only'} />}
     {draft && <>
       {sourceInfo && <p className="notice">发布时间：{sourceInfo.published_date || '未确认'}（{sourceInfo.publish_date_source === 'page' ? '网页提供' : sourceInfo.publish_date_source === 'user' ? '用户填写' : '未知'}）；获取时间：{sourceInfo.fetched_at || '手动粘贴'}。相对日期在发布时间未知时不自动推算。</p>}
       <div className="flex gap-2 md:hidden" role="group" aria-label="核对视图"><button type="button" className={mobileView === 'source' ? 'button-secondary segment-active' : 'button-secondary'} aria-pressed={mobileView === 'source'} onClick={() => setMobileView('source')}>通知原文</button><button type="button" className={mobileView === 'draft' ? 'button-secondary segment-active' : 'button-secondary'} aria-pressed={mobileView === 'draft'} onClick={() => setMobileView('draft')}>整理草稿</button></div>

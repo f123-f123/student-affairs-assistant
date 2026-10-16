@@ -30,12 +30,14 @@ export type Citation = Pick<KnowledgeItem, 'id' | 'source_name' | 'source_level'
 export type AskResponse = {
   answerable: boolean;
   answer?: string;
+  notice?: string;
   citations: Citation[];
   contacts: Contact[];
-  category_id: string;
+  category_id: string | null;
 };
 
 export type EventMaterial = { name: string; done: boolean; source_text: string };
+export type NoticeAttachment = { name: string; url: string; format: string; status: 'unparsed' };
 export type StudentEvent = {
   id: string;
   device_id: string;

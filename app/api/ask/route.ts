@@ -18,7 +18,8 @@ type HistoryEntry = { question: string; created_at: string; response?: AskRespon
 function serviceError(errorType: string, error?: unknown) {
   if ((error as { code?: string } | null)?.code === 'PGRST205') return databaseFailure(`ask.${errorType}`, error);
   console.error('[conversation history] service unavailable', { operation: errorType, detail: error ? safeDatabaseError(error) : undefined });
-  const code = errorType === 'database_not_configured' || (error instanceof Error && error.message === 'database_not_configured') ? 'DATABASE_CONFIG_MISSING' : 'DATABASE_UNAVAILABLE';
+  const code = errorType === 'database_not_configured' || (error instanceof Error && error.message === 'database_not_configured') ? 'DATABASE_CONFIG_MISSING'
+    : errorType.startsWith('model_') ? 'MODEL_UNAVAILABLE' : errorType.startsWith('database_') ? 'DATABASE_UNAVAILABLE' : 'SERVICE_UNAVAILABLE';
   return NextResponse.json({ error: conversationError(503, code).message, code }, { status: 503, headers });
 }
 const unauthenticated = () => NextResponse.json({ error: conversationError(401, 'UNAUTHENTICATED').message, code: 'UNAUTHENTICATED' }, { status: 401, headers });
@@ -75,7 +76,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: '对话标识无效', code: 'INVALID_INPUT' }, { status: 400, headers });
   }
   let db: ReturnType<typeof getSupabase>;
-  try { db = getSupabase(); } catch { return serviceError('database_not_configured'); }
+  try { db = getSupabase(); } catch (error) { return serviceError('database_connect_failed', error); }
 
   try {
     const owner = await db.from('conversations').select('id,title').eq('id', conversationId).eq('device_id', deviceId).maybeSingle();
@@ -83,7 +84,7 @@ export async function POST(request: Request) {
     if (!owner.data) return NextResponse.json({ error: '对话不存在', code: 'NOT_FOUND' }, { status: 404, headers });
     const title = owner.data.title;
     return await answerInConversation(db, question, deviceId, conversationId, title);
-  } catch { return serviceError('database_read_failed'); }
+  } catch (error) { return serviceError('database_read_failed', error); }
 }
 
 async function answerInConversation(db: ReturnType<typeof getSupabase>, question: string, deviceId: string, conversationId: string, currentTitle: string) {
@@ -99,33 +100,35 @@ async function answerInConversation(db: ReturnType<typeof getSupabase>, question
       db.from('chat_logs').select('question').eq('device_id', deviceId).eq('conversation_id', conversationId)
         .order('created_at', { ascending: false }).limit(3),
     ]);
-    if (categoriesResult.error || itemsResult.error || previousResult.error) throw new Error('database_read_failed');
+    if (categoriesResult.error || itemsResult.error || previousResult.error) throw categoriesResult.error || itemsResult.error || previousResult.error;
     const categories = (categoriesResult.data ?? []) as Category[];
     const previousQuestion = previousResult.data?.length
       ? previousResult.data.map(row => row.question as string).reverse().join('；') : null;
     const searchQuestion = retrievalQuestion(question, previousQuestion);
     const items = retrieveKnowledge(searchQuestion, (itemsResult.data ?? []) as unknown as KnowledgeItem[], categories);
-    if (!categories.length) throw new Error('database_read_failed');
-    const raw = items.length ? await askModel(question, categories, items, searchQuestion === question ? null : previousQuestion) : JSON.stringify({ answerable: false, answer: '', citations: [], category: null });
+    const raw = categories.length && items.length ? await askModel(question, categories, items, searchQuestion === question ? null : previousQuestion) : JSON.stringify({ answerable: false, answer: '', citations: [], category: null });
     const result = validateAnswer(raw, items, categories);
-    categoryId = result.category;
+    categoryId = result.category || null;
     answerable = result.answerable;
     citedIds = result.citations;
-    const contactsResult = await db.from('contacts')
+    const contactsResult = categoryId ? await db.from('contacts')
       .select('id,name,role,phone,email,office,office_hours')
-      .eq('category_id', categoryId).order('role');
-    if (contactsResult.error) throw new Error('database_read_failed');
+      .eq('category_id', categoryId).order('role') : { data: [], error: null };
+    if (contactsResult.error) throw contactsResult.error;
     const contacts = (contactsResult.data ?? []) as Contact[];
     const citations = citedIds.map(id => {
       const { source_name, source_level, source_url, source_excerpt, updated_at, question, answer, version } = items.find(item => item.id === id)!;
       return { id, source_name, source_level, source_url, source_excerpt: source_excerpt ?? null, updated_at, question, answer, version: version ?? 1 };
     });
-    const response = { answerable, ...(answerable ? { answer: result.answer } : {}), citations, contacts, category_id: categoryId };
+    const response: AskResponse = { answerable, ...(answerable ? { answer: result.answer } : {}), citations, contacts, category_id: categoryId,
+      ...(!categories.length ? { notice: '知识库尚未配置基础分类，暂时无法提供办事依据，请由管理员初始化分类。' }
+        : !items.length ? { notice: '当前没有与该问题匹配的有效已审核知识，暂时无法给出有依据的回答；可以提交工单请老师确认。' } : {}),
+    };
     const logResult = await db.from('chat_logs').insert({
       device_id: deviceId, conversation_id: conversationId, question, answerable, category_id: categoryId,
       cited_item_ids: citedIds, error_type: result.errorType, response_json: response,
     });
-    if (logResult.error) throw new Error('database_write_failed');
+    if (logResult.error) throw logResult.error;
     // 首问用问题命名，后续提问仅更新排序时间。
     await db.from('conversations').update({
       updated_at: new Date().toISOString(),
@@ -134,12 +137,12 @@ async function answerInConversation(db: ReturnType<typeof getSupabase>, question
     return NextResponse.json(response, { headers });
   } catch (error) {
     const errorType = error instanceof Error && /^(database_|model_)/.test(error.message)
-      ? error.message : 'service_failed';
+      ? error.message : error && typeof error === 'object' && 'code' in error ? 'database_query_failed' : 'service_failed';
     // 故障也尽力记日志；日志失败不掩盖原始服务错误。
     await db.from('chat_logs').insert({
       device_id: deviceId, conversation_id: conversationId, question, answerable: false, category_id: categoryId,
       cited_item_ids: [], error_type: errorType,
     }).then(() => {}, () => {});
-    return serviceError(errorType);
+    return serviceError(errorType, error);
   }
 }

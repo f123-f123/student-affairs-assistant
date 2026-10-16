@@ -45,9 +45,10 @@ async function callModel(system: string, content: string, maxTokens = 1024): Pro
       ? { model, max_tokens: maxTokens, temperature: 0, thinking: { type: 'disabled' }, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content }] }
       : { model, max_tokens: maxTokens, temperature: 0, system, messages: [{ role: 'user', content }] }),
     cache: 'no-store',
-  });
+    signal: AbortSignal.timeout(30_000),
+  }).catch(error => { throw new Error(error?.name === 'TimeoutError' ? 'model_timeout' : 'model_request_failed'); });
   if (!response.ok) throw new Error('model_request_failed');
-  const data: unknown = await response.json();
+  const data: unknown = await response.json().catch(() => { throw new Error('model_response_failed'); });
   if (deepseek) {
     const completion = data as { choices?: { message?: { content?: unknown } }[] };
     const text = completion?.choices?.[0]?.message?.content;
@@ -58,6 +59,6 @@ async function callModel(system: string, content: string, maxTokens = 1024): Pro
   const text = data.content.filter((part: unknown): part is { type: 'text'; text: string } =>
     !!part && typeof part === 'object' && 'type' in part && part.type === 'text' && 'text' in part && typeof part.text === 'string')
     .map((part: { text: string }) => part.text).join('');
-  if (!text) throw new Error('model_response_failed');
+  if (!text.trim()) throw new Error('model_response_failed');
   return text;
 }

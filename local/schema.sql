@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS source_articles (
   id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES information_sources(id) ON DELETE CASCADE,
   owner_id TEXT NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, source_text TEXT NOT NULL,
   published_date TEXT, fetched_at TEXT NOT NULL, content_hash TEXT NOT NULL,
-  completeness TEXT NOT NULL CHECK (completeness = 'complete'), revision INTEGER NOT NULL DEFAULT 1,
+  completeness TEXT NOT NULL CHECK (completeness IN ('complete','body_only')), revision INTEGER NOT NULL DEFAULT 1,
+  attachments TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(attachments) AND json_type(attachments) = 'array'),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(source_id,url)
@@ -83,7 +84,8 @@ CREATE TABLE IF NOT EXISTS source_articles (
 CREATE TABLE IF NOT EXISTS source_article_versions (
   id TEXT PRIMARY KEY, article_id TEXT NOT NULL REFERENCES source_articles(id) ON DELETE CASCADE,
   owner_id TEXT NOT NULL, revision INTEGER NOT NULL, source_text TEXT NOT NULL,
-  content_hash TEXT NOT NULL, fetched_at TEXT NOT NULL, UNIQUE(article_id,revision)
+  content_hash TEXT NOT NULL, fetched_at TEXT NOT NULL,
+  attachments TEXT NOT NULL DEFAULT '[]', completeness TEXT NOT NULL DEFAULT 'legacy_unknown', UNIQUE(article_id,revision)
 );
 
 CREATE INDEX IF NOT EXISTS contacts_category_idx ON contacts(category_id);

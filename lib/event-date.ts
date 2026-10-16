@@ -1,3 +1,5 @@
+import { isDateOnly } from './validation';
+
 export type ResolvedDeadline = { deadline: string | null; inferred: boolean; evidence: string | null };
 
 export function shanghaiToday(now = new Date()): string {
@@ -45,7 +47,7 @@ export function resolveDeadline(sourceText: string, evidence: string | null, pub
   if (!evidence || !sourceText.includes(evidence)) return { deadline: null, inferred: false, evidence: null };
   // 截断的时分不能按“只有日期”处理，否则会生成错误的 23:59 截止时间。
   if (/\d{1,2}[:：]\d(?!\d)/.test(evidence)) return { deadline: null, inferred: false, evidence };
-  const published = publishDate && /^\d{4}-\d{2}-\d{2}$/.test(publishDate) ? new Date(`${publishDate}T00:00:00Z`) : null;
+  const published = isDateOnly(publishDate) ? new Date(`${publishDate}T00:00:00Z`) : null;
   let year: number, month: number, day: number;
   let inferred = false;
   const relativeWeek = /(本周|下周)([一二三四五六日天])/.exec(evidence);
