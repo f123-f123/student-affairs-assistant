@@ -15,6 +15,8 @@ describe('ICS 导出', () => {
   it('生成并回读 VEVENT、稳定 UID 和三条提醒', () => {
     const file = generateEventsIcs([item]);
     const calendar = new ICAL.Component(ICAL.parse(file));
+    expect(calendar.getFirstPropertyValue('prodid')).toBe('校园办事猿');
+    expect(file).toContain('校园办事猿日程');
     const event = calendar.getFirstSubcomponent('vevent')!;
     expect(event.getFirstPropertyValue('uid')).toBe(`event-${item.id}@student-affairs.local`);
     expect(event.getAllSubcomponents('valarm')).toHaveLength(3);

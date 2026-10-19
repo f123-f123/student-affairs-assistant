@@ -110,7 +110,7 @@ describe('模拟身份业务隔离', () => {
     state.user = MOCK_USERS['student-a'];
     const ticket = await db.from('tickets').insert({ device_id: MOCK_USERS['student-a'].id, question: '测试办理问题' }).select('id').single();
     const ticketId = (ticket.data as { id: string }).id;
-    const replyRequest = () => jsonRequest(`/api/teacher/tickets/${ticketId}/reply`, { reply: '请查看办理说明' }, 'PUT');
+    const replyRequest = () => jsonRequest(`/api/teacher/tickets/${ticketId}/reply`, { reply: '请查看办理说明', reply_version: 0 }, 'PUT');
     expect((await teacherReply.PUT(replyRequest(), { params: Promise.resolve({ id: ticketId }) })).status).toBe(403);
     expect((await teacherKnowledge.GET()).status).toBe(403);
     state.user = MOCK_USERS.teacher;

@@ -1,5 +1,27 @@
 import type { EventDraft, EventMaterial } from './types';
 import { isDateOnly, isoDateTime } from './validation';
+import { UUID_RE } from './validation';
+import { signatureDates } from './notice-dates';
+import type { EventDateContext } from './types';
+
+function parseDateContext(value: unknown, source: string): EventDateContext | null {
+  if (value == null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('日期依据无效');
+  const context = value as EventDateContext;
+  if (!['page', 'signature', 'user', 'unknown'].includes(context.basis) || !['none', 'year_required', 'conflict', 'invalid', 'resolved', 'manual'].includes(context.state) ||
+      !['parsed', 'manual'].includes(context.mode) || !Array.isArray(context.candidates) || context.candidates.length > 24 ||
+      context.publication_cleared !== undefined && typeof context.publication_cleared !== 'boolean' ||
+      context.suggested_deadline != null && !isoDateTime(context.suggested_deadline)) throw new Error('日期依据无效');
+  const signatures = signatureDates(source);
+  const candidates = context.candidates.map(candidate => {
+    if (!candidate || !isDateOnly(candidate.date) || !['page', 'signature'].includes(candidate.kind) || typeof candidate.evidence !== 'string' || candidate.evidence.length > 500 ||
+        candidate.kind === 'signature' && !signatures.some(item => item.date === candidate.date && item.evidence === candidate.evidence)) throw new Error('日期依据须与原文一致');
+    return { date: candidate.date, kind: candidate.kind, evidence: candidate.evidence };
+  });
+  return { candidates, basis: context.basis, state: context.state, mode: context.mode,
+    ...(context.publication_cleared !== undefined ? { publication_cleared: context.publication_cleared } : {}),
+    ...(context.suggested_deadline !== undefined ? { suggested_deadline: context.suggested_deadline } : {}) };
+}
 
 export function parseEventMaterials(value: unknown): EventMaterial[] {
   if (!Array.isArray(value) || value.length > 100) throw new Error('材料内容无效');
@@ -34,10 +56,13 @@ export function parseEventInput(value: unknown): EventDraft {
     catch { throw new Error('原链接无效'); }
   }
   if (data.publish_date && !isDateOnly(data.publish_date)) throw new Error('发布日期无效');
+  if (data.category_id != null && (typeof data.category_id !== 'string' || !UUID_RE.test(data.category_id))) throw new Error('事项类别无效');
   return {
     title: data.title.trim(), summary: (data.summary as string).trim(), eligibility: (data.eligibility as string).trim(),
     deadline, deadline_source_text: data.deadline_source_text?.trim() || null,
     deadline_inferred: data.deadline_inferred, submit_to: (data.submit_to as string).trim(), materials,
     source_url: data.source_url || null, source_text: data.source_text.trim(), publish_date: data.publish_date || null,
+    ...(data.date_context !== undefined ? { date_context: parseDateContext(data.date_context, data.source_text) } : {}),
+    ...(data.category_id !== undefined ? { category_id: data.category_id || null } : {}),
   } as EventDraft;
 }

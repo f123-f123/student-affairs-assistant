@@ -1,4 +1,5 @@
 import type { Category, KnowledgeItem } from './types';
+import { assessKnowledgeScope, knowledgeScope, normalizeProjectText } from './knowledge-scope';
 
 export type ValidatedAnswer = {
   answerable: boolean;
@@ -7,6 +8,18 @@ export type ValidatedAnswer = {
   category: string;
   errorType: string | null;
 };
+
+export function qualifyAnswerScope(raw: string, items: KnowledgeItem[]): string {
+  let value;
+  try { value = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); } catch { return raw; }
+  if (!value || value.answerable !== true || typeof value.answer !== 'string' || !value.answer.trim() || !Array.isArray(value.citations) || !value.citations.length) return raw;
+  const cited = value.citations.map((id: unknown) => items.find(item => item.id === id));
+  if (cited.some((item: KnowledgeItem | undefined) => !item || assessKnowledgeScope(value.answer, item).state === 'conflict')) return raw;
+  const scopes = (cited as KnowledgeItem[]).map(knowledgeScope).filter(scope => !!scope);
+  const terms = [...new Set(scopes.flatMap(scope => [...scope.units, ...scope.cohorts, ...scope.years, ...scope.projects]))];
+  if (terms.some(term => !normalizeProjectText(value.answer).includes(normalizeProjectText(term)))) value.answer = `【${terms.join(' · ')}】\n${value.answer}`;
+  return JSON.stringify(value);
+}
 
 function numbers(text: string, pattern: RegExp): string[] {
   return Array.from(text.matchAll(pattern), match => match[0].replace(/[\s,，]/g, ''));
@@ -60,6 +73,11 @@ export function validateAnswer(raw: string, items: KnowledgeItem[], categories: 
   if (!citations.length) return invalid('missing_citations', category);
   const byId = new Map(items.map(item => [item.id, item]));
   if (citations.some(id => !byId.has(id))) return invalid('unknown_citation', category);
+  const normalizedAnswer = normalizeProjectText(value.answer);
+  if (citations.some(id => {
+    const scope = byId.get(id)!.scope;
+    return scope && [...scope.units, ...scope.cohorts, ...scope.years, ...scope.projects].some(term => !normalizedAnswer.includes(normalizeProjectText(term)));
+  })) return invalid('missing_scope', category);
   const citedText = citations.map(id => {
     const item = byId.get(id)!;
     return `${item.question} ${item.answer}`;
@@ -76,7 +94,7 @@ export function validateAnswer(raw: string, items: KnowledgeItem[], categories: 
   if (dates(value.answer).some(date => !sourceDates.has(date))) return invalid('unsupported_date', category);
   const sourceTimes = new Set(clockTimes(citedText));
   if (clockTimes(value.answer).some(time => !sourceTimes.has(time))) return invalid('unsupported_time', category);
-  for (const term of ['本院', '外院', '本科生', '研究生', '全日制', '非全日制']) {
+  for (const term of ['本院', '外院', '本科生', '研究生', '全日制', '非全日制', '全校', '所有学院', '不限学院']) {
     if (value.answer.includes(term) && !citedText.includes(term)) return invalid('unsupported_eligibility', category);
   }
   const materialPhrases = Array.from(value.answer.matchAll(/(?:提交|提供|准备|携带)([\p{Script=Han}]{2,12}材料)/gu), match => match[1]);
@@ -84,6 +102,8 @@ export function validateAnswer(raw: string, items: KnowledgeItem[], categories: 
   for (const clause of value.answer.split(/[。；;，,\n]/)) {
     if (!/(材料|证明|资格|条件|提交|截止)/.test(clause)) continue;
     const clean = clause.replace(/\s/g, '');
+    const heading = clean.replace(/^(?:[一二三四五六七八九十]+[、.]|\d+[.、)）])/, '').replace(/[：:]$/, '');
+    if (/^(?:适用对象|适用对象与条件|申请条件|参评条件|分项条件|办理条件|办理步骤|办理流程|申请材料|所需材料|材料要求|截止时间|注意事项)$/.test(heading)) continue;
     if (clean.length >= 4 && !Array.from({ length: clean.length - 3 }, (_, index) => clean.slice(index, index + 4))
       .some(fragment => citedText.includes(fragment))) return invalid('unsupported_policy_fact', category);
   }

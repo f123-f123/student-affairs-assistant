@@ -3,7 +3,9 @@ import { extractEventModel } from '@/lib/llm';
 import { parseEventExtraction } from '@/lib/event-extraction';
 import { fetchNotice } from '@/lib/safe-fetch';
 import { attachmentSchemaMissing, sourceFailure } from '@/lib/source-errors';
-import type { NoticeAttachment } from '@/lib/types';
+import type { NoticeAttachment, PublicationDateCandidate } from '@/lib/types';
+import { publicationDates, selectPublicationDate } from '@/lib/notice-dates';
+import { noticeContactCandidates } from '@/lib/notice-contacts';
 import { getCurrentUser } from '@/lib/auth';
 import { unauthorized } from '@/lib/teacher-api';
 import { getSupabase } from '@/lib/supabase';
@@ -29,7 +31,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: '发布日期无效' }, { status: 400, headers });
   }
   let publishDate = providedDate;
-  let dateSource: 'user' | 'page' | 'unknown' = providedDate ? 'user' : 'unknown';
+  let dateSource: 'user' | 'page' | 'signature' | 'unknown' = providedDate ? 'user' : 'unknown';
+  let dateCandidates: PublicationDateCandidate[] = [];
   let fetchedAt: string | null = null;
   let sourceText: string;
   let sourceUrl: string | null = null;
@@ -44,7 +47,7 @@ export async function POST(request: Request) {
       completeness = article.data.completeness === 'complete' ? 'legacy_unknown' : 'body_only';
       attachments = article.data.attachments ?? [];
       sourceText = article.data.source_text; sourceUrl = article.data.url; fetchedAt = article.data.fetched_at;
-      if (!providedDate && article.data.published_date) { publishDate = article.data.published_date; dateSource = 'page'; }
+      if (article.data.published_date) dateCandidates.push({ date: article.data.published_date, kind: 'page', evidence: `已保存文章的发布日期：${article.data.published_date}` });
     } catch (cause) { return attachmentSchemaMissing(cause) ? sourceFailure(cause) : NextResponse.json({ error: '文章暂时不可用' }, { status: 503, headers }); }
   } else if (hasUrl) {
     try {
@@ -53,20 +56,24 @@ export async function POST(request: Request) {
       sourceUrl = fetched.sourceUrl;
       fetchedAt = fetched.fetchedAt;
       attachments = fetched.attachments;
-      if (!providedDate && fetched.publishedDate) { publishDate = fetched.publishedDate; dateSource = 'page'; }
+      dateCandidates = fetched.dateCandidates;
     } catch (error) { return sourceFailure(error); }
   } else {
     sourceText = (data.text as string).trim();
     if (sourceText.length < 20 || sourceText.length > 20000) return NextResponse.json({ error: '通知正文需为20到20000字' }, { status: 400, headers });
   }
-  const source = { published_date: publishDate, publish_date_source: dateSource, fetched_at: fetchedAt, completeness, attachments,
+  dateCandidates = publicationDates(sourceText, dateCandidates);
+  const selectedDate = selectPublicationDate(dateCandidates, providedDate);
+  publishDate = selectedDate.date; dateSource = selectedDate.kind;
+  const source = { published_date: publishDate, publish_date_source: dateSource, date_candidates: dateCandidates, date_conflict: selectedDate.conflict,
+    contact_candidates: noticeContactCandidates(sourceText), fetched_at: fetchedAt, completeness, attachments,
     warning: hasText ? '仅依据粘贴的文本整理，通知资料完整性未核验。' : '仅依据网页正文整理；附件尚未解析，整份通知资料完整性未核验，请打开附件人工核对。' };
   try {
     // 模型偶尔返回空白或不完整 JSON；仅对这两种情况重试一次。
     for (let attempt = 0; ; attempt++) {
       try {
         const raw = await extractEventModel(sourceText, publishDate);
-        return NextResponse.json({ draft: parseEventExtraction(raw, sourceText, publishDate, sourceUrl), source }, { headers });
+        return NextResponse.json({ draft: parseEventExtraction(raw, sourceText, providedDate, sourceUrl, dateCandidates), source }, { headers });
       } catch (error) {
         const reason = error instanceof Error ? error.message : '';
         if (attempt === 0 && (reason === 'model_response_failed' || reason === 'invalid_extraction')) continue;

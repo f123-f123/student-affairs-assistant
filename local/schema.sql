@@ -6,7 +6,11 @@ CREATE TABLE IF NOT EXISTS categories (
 CREATE TABLE IF NOT EXISTS contacts (
   id TEXT PRIMARY KEY, category_id TEXT NOT NULL REFERENCES categories(id), name TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('teacher', 'student_leader')),
-  phone TEXT, email TEXT, office TEXT, office_hours TEXT
+  phone TEXT, email TEXT, office TEXT, office_hours TEXT,
+  scope TEXT NOT NULL DEFAULT 'category', notice_event_id TEXT REFERENCES events(id) ON DELETE CASCADE,
+  source_excerpt TEXT, source_url TEXT, source_hash TEXT,
+  notice_import_id TEXT REFERENCES knowledge_imports(id), reviewed_by TEXT, reviewed_at TEXT,
+  reviewed_scope TEXT, review_status TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE TABLE IF NOT EXISTS knowledge_items (
   id TEXT PRIMARY KEY, category_id TEXT NOT NULL REFERENCES categories(id), question TEXT NOT NULL,
@@ -31,6 +35,24 @@ CREATE TABLE IF NOT EXISTS knowledge_item_versions (
   snapshot TEXT NOT NULL, archived_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   PRIMARY KEY (item_id, version)
 );
+CREATE TABLE IF NOT EXISTS knowledge_imports (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, requested_url TEXT NOT NULL, source_url TEXT,
+  title TEXT NOT NULL, source_text TEXT NOT NULL, published_date TEXT, date_candidates TEXT NOT NULL DEFAULT '[]',
+  attachments TEXT NOT NULL DEFAULT '[]', fetched_at TEXT, content_hash TEXT,
+  status TEXT NOT NULL CHECK(status IN ('failed','fetched','review','published')),
+  error_code TEXT, error_message TEXT, version INTEGER NOT NULL DEFAULT 1, contacts_version INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), UNIQUE(source_url,content_hash)
+);
+CREATE TABLE IF NOT EXISTS knowledge_import_drafts (
+  id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES knowledge_imports(id), data TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','ignored','published')),
+  published_item_id TEXT REFERENCES knowledge_items(id), reviewed_by TEXT, reviewed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS knowledge_import_publications (
+  id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES knowledge_imports(id), entries TEXT NOT NULL,
+  result TEXT NOT NULL, reviewed_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY, device_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '新对话',
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -54,6 +76,7 @@ CREATE TABLE IF NOT EXISTS events (
   source_url TEXT CHECK (source_url IS NULL OR length(source_url) <= 2000),
   source_text TEXT NOT NULL CHECK (length(source_text) BETWEEN 1 AND 20000), publish_date TEXT,
   source_article_id TEXT, source_fetched_at TEXT, source_confirmed_at TEXT, publish_date_source TEXT,
+  date_context TEXT, category_id TEXT REFERENCES categories(id),
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','done','archived')),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))

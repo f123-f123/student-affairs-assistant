@@ -16,6 +16,9 @@ export type KnowledgeItem = {
   status?: 'draft' | 'confirmed' | 'superseded' | 'inactive';
   updated_at: string;
   categories: { name: string } | null;
+  scope?: import('./knowledge-import').KnowledgeScope | null;
+  facts?: { deadline: string; deadline_evidence: string } | null;
+  import_draft_id?: string | null;
 };
 export type Contact = {
   id: string;
@@ -26,18 +29,42 @@ export type Contact = {
   office: string | null;
   office_hours: string | null;
 };
-export type Citation = Pick<KnowledgeItem, 'id' | 'source_name' | 'source_level' | 'updated_at' | 'source_url'> & { version: number; question: string; answer: string; source_excerpt: string | null };
+export type NoticeContactGroup = {
+  import_id: string | null; item_ids: string[]; title: string; source_url: string | null; scope_label: string; category_id: string | null;
+  state: 'confirmed' | 'unreviewed' | 'source_changed' | 'unavailable' | 'unlinked';
+  contacts: Contact[]; category_contacts: Contact[];
+  category_error?: boolean;
+};
+export type Citation = Pick<KnowledgeItem, 'id' | 'source_name' | 'source_level' | 'updated_at' | 'source_url'> & { category_id?: string; version: number; question: string; answer: string; source_excerpt: string | null };
 export type AskResponse = {
   answerable: boolean;
+  status?: 'answered' | 'no_knowledge' | 'needs_scope' | 'model_refused' | 'validation_failed';
+  reason_code?: string;
+  validation_error?: string;
   answer?: string;
   notice?: string;
   citations: Citation[];
   contacts: Contact[];
+  contacts_error?: 'CONTACTS_UNAVAILABLE';
+  contact_scope_note?: string;
+  notice_contact_groups?: NoticeContactGroup[];
   category_id: string | null;
+  topic_context?: { question: string; scope_candidates?: { id: string; version: number }[] };
+  scope_candidates?: { id: string; version: number; label: string; missing_fields: string[]; source_name: string; source_url: string | null; notice_contact_groups?: NoticeContactGroup[] }[];
 };
 
 export type EventMaterial = { name: string; done: boolean; source_text: string };
 export type NoticeAttachment = { name: string; url: string; format: string; status: 'unparsed' };
+export type PublicationDateCandidate = { date: string; kind: 'page' | 'signature'; evidence: string };
+export type EventDateContext = {
+  candidates: PublicationDateCandidate[];
+  basis: 'page' | 'signature' | 'user' | 'unknown';
+  state: 'none' | 'year_required' | 'conflict' | 'invalid' | 'resolved' | 'manual';
+  mode: 'parsed' | 'manual';
+  publication_cleared?: boolean;
+  suggested_deadline?: string | null;
+};
+export type NoticeContactCandidate = { name: string; role: Contact['role'] | null; email: string | null; phone: string | null; source_excerpt: string };
 export type StudentEvent = {
   id: string;
   device_id: string;
@@ -52,10 +79,15 @@ export type StudentEvent = {
   source_url: string | null;
   source_text: string;
   publish_date: string | null;
+  date_context?: EventDateContext | null;
+  category_id?: string | null;
+  notice_contacts?: Contact[];
+  category_contacts?: Contact[];
+  notice_contacts_error?: string;
   source_article_id?: string | null;
   source_fetched_at?: string | null;
   source_confirmed_at?: string | null;
-  publish_date_source?: 'page' | 'user' | 'unknown' | null;
+  publish_date_source?: 'page' | 'signature' | 'user' | 'unknown' | null;
   status: 'active' | 'done' | 'archived';
   created_at: string;
   updated_at: string;

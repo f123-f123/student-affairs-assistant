@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { localImportRpc } from './local-imports';
+import { localPublicContactRpc } from './local-public-contacts';
 import type { DatabaseSync as DatabaseSyncType, SQLInputValue } from 'node:sqlite';
 
 // 运行时从 Node 内置模块取 SQLite，避免测试打包器误将其当成 npm 包。
@@ -9,9 +11,9 @@ const { DatabaseSync } = process.getBuiltinModule('node:sqlite')!;
 type Row = Record<string, unknown>;
 type Result = { data: unknown; error: { message: string } | null; count?: number | null };
 type Filter = { column: string; operator: string; value: unknown };
-const tables = new Set(['categories', 'contacts', 'knowledge_items', 'knowledge_item_versions', 'tickets', 'conversations', 'chat_logs', 'teacher_login_attempts', 'events', 'information_sources', 'source_links', 'source_articles', 'source_article_versions']);
+const tables = new Set(['categories', 'contacts', 'knowledge_items', 'knowledge_item_versions', 'tickets', 'conversations', 'chat_logs', 'teacher_login_attempts', 'events', 'information_sources', 'source_links', 'source_articles', 'source_article_versions', 'knowledge_imports', 'knowledge_import_drafts', 'knowledge_import_publications']);
 const booleanColumns = new Set(['sedimented', 'answerable', 'deadline_inferred']);
-const jsonColumns = new Set(['cited_item_ids', 'materials', 'response_json', 'aliases', 'snapshot', 'attachments']);
+const jsonColumns = new Set(['cited_item_ids', 'materials', 'response_json', 'aliases', 'snapshot', 'attachments', 'date_context', 'date_candidates', 'data', 'entries', 'result', 'facts', 'topic_context']);
 
 function identifier(value: string): string {
   if (!/^[a-z][a-z0-9_]*$/.test(value)) throw new Error('invalid_column');
@@ -19,6 +21,7 @@ function identifier(value: string): string {
 }
 
 function encode(column: string, value: unknown): SQLInputValue {
+  if (column === 'scope' && value && typeof value === 'object') return JSON.stringify(value);
   if (jsonColumns.has(column)) return JSON.stringify(value);
   if (booleanColumns.has(column)) return value ? 1 : 0;
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') return value;
@@ -29,6 +32,7 @@ function decode(row: Row): Row {
   const value = { ...row };
   for (const column of booleanColumns) if (column in value) value[column] = !!value[column];
   for (const column of jsonColumns) if (typeof value[column] === 'string') value[column] = JSON.parse(value[column]);
+  if (typeof value.scope === 'string' && value.scope.startsWith('{')) value.scope = JSON.parse(value.scope);
   return value;
 }
 
@@ -42,6 +46,7 @@ class LocalQuery implements PromiseLike<Result> {
   private values: Row = {};
   private one: 'single' | 'maybeSingle' | null = null;
   private rowLimit: number | null = null;
+  private rowOffset = 0;
 
   constructor(private db: DatabaseSyncType, private table: string) {
     if (!tables.has(table)) throw new Error('invalid_table');
@@ -67,6 +72,7 @@ class LocalQuery implements PromiseLike<Result> {
     return this;
   }
   limit(count: number) { this.rowLimit = count; return this; }
+  range(from: number, to: number) { this.rowOffset = from; this.rowLimit = to - from + 1; return this; }
   insert(values: Row) { this.action = 'insert'; this.values = values; return this; }
   update(values: Row) { this.action = 'update'; this.values = values; return this; }
   delete() { this.action = 'delete'; return this; }
@@ -118,8 +124,8 @@ class LocalQuery implements PromiseLike<Result> {
           const nullOrder = nullsFirst === undefined ? '' : `${name} IS NULL ${nullsFirst ? 'DESC' : 'ASC'}, `;
           return `${nullOrder}${name} ${ascending ? 'ASC' : 'DESC'}`;
         }).join(', ');
-        rows = this.db.prepare(`SELECT * FROM ${identifier(this.table)}${where.sql}${order ? ` ORDER BY ${order}` : ''}${this.rowLimit === null ? '' : ' LIMIT ?'}`)
-          .all(...where.args, ...(this.rowLimit === null ? [] : [this.rowLimit])) as Row[];
+        rows = this.db.prepare(`SELECT * FROM ${identifier(this.table)}${where.sql}${order ? ` ORDER BY ${order}` : ''}${this.rowLimit === null ? '' : ' LIMIT ? OFFSET ?'}`)
+          .all(...where.args, ...(this.rowLimit === null ? [] : [this.rowLimit, this.rowOffset])) as Row[];
       } else if (this.action === 'insert') {
         const value: Row = { id: randomUUID(), ...this.values };
         const columns = Object.keys(value);
@@ -158,6 +164,10 @@ class LocalDb {
   // SQLite 单连接事务保证“确认入库”四步原子完成，重复点击返回同一错误。
   async rpc(name: string, params: Row): Promise<Result> {
     try {
+      const contact = localPublicContactRpc(this.db, name, params);
+      if (contact) return contact;
+      const imported = localImportRpc(this.db, name, params);
+      if (imported) return imported;
       if (name === 'record_teacher_login_failure') {
         const key = params.p_key;
         if (typeof key !== 'string') throw new Error('invalid_key');
@@ -221,11 +231,12 @@ class LocalDb {
           return { data: { status, id, title }, error: null };
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       }
-      if (name !== 'confirm_ticket_knowledge') throw new Error('unknown_rpc');
+      if (name !== 'confirm_ticket_knowledge' && name !== 'confirm_ticket_knowledge_checked') throw new Error('unknown_rpc');
       this.db.exec('BEGIN IMMEDIATE');
       try {
         const ticket = this.db.prepare('SELECT * FROM tickets WHERE id = ?').get(params.p_ticket_id as string) as Row | undefined;
         if (!ticket) throw new Error('ticket_not_found');
+        if (name === 'confirm_ticket_knowledge_checked' && (ticket.reply_version !== params.p_expected_reply_version || ticket.teacher_reply !== params.p_expected_reply)) throw new Error('reply_version_conflict');
         if (ticket.sedimented) throw new Error('already_sedimented');
         if (ticket.status !== 'answered' || !String(ticket.teacher_reply || '').trim()) throw new Error('ticket_not_answered');
         const categoryId = params.p_category_id as string;
@@ -240,6 +251,7 @@ class LocalDb {
         this.db.prepare("INSERT INTO knowledge_items (id,category_id,question,answer,source_level,source_name,status,supersedes,reviewed_at) VALUES (?,?,?,?,1,'老师确认回答','confirmed',?,?)")
           .run(id, categoryId, String(params.p_question).trim(), String(params.p_answer).trim(), previous ?? null, new Date().toISOString());
         if (previous) this.db.prepare("UPDATE knowledge_items SET status = 'superseded' WHERE id = ?").run(previous);
+        if (name === 'confirm_ticket_knowledge_checked') this.db.prepare('UPDATE knowledge_items SET reviewed_by=?,source_excerpt=? WHERE id=?').run(params.p_actor as string, ticket.teacher_reply as string, id);
         this.db.prepare('UPDATE tickets SET sedimented = 1, knowledge_item_id = ? WHERE id = ?').run(id, params.p_ticket_id as string);
         this.db.exec('COMMIT');
         return { data: id, error: null };
@@ -281,6 +293,13 @@ export function migrateEventSourceColumns(db: DatabaseSyncType) {
   for (const column of ['source_article_id', 'source_fetched_at', 'source_confirmed_at', 'publish_date_source']) {
     if (!columns.includes(column)) db.exec(`ALTER TABLE events ADD COLUMN ${column} TEXT`);
   }
+  for (const column of ['date_context', 'category_id']) if (!columns.includes(column)) db.exec(`ALTER TABLE events ADD COLUMN ${column} TEXT`);
+}
+
+function migrateNoticeContacts(db: DatabaseSyncType) {
+  const contacts = new Set((db.prepare('PRAGMA table_info(contacts)').all() as { name: string }[]).map(column => column.name));
+  if (!contacts.has('scope')) db.exec("ALTER TABLE contacts ADD COLUMN scope TEXT NOT NULL DEFAULT 'category'");
+  for (const column of ['notice_event_id', 'source_excerpt', 'source_url', 'source_hash']) if (!contacts.has(column)) db.exec(`ALTER TABLE contacts ADD COLUMN ${column} TEXT`);
 }
 
 function migrateKnowledge(db: DatabaseSyncType) {
@@ -288,6 +307,7 @@ function migrateKnowledge(db: DatabaseSyncType) {
   const additions: Record<string, string> = {
     aliases: "TEXT NOT NULL DEFAULT '[]'", source_excerpt: 'TEXT', valid_from: 'TEXT', valid_until: 'TEXT',
     version: 'INTEGER NOT NULL DEFAULT 1', reviewed_at: 'TEXT', reviewed_by: 'TEXT', origin_event_id: 'TEXT',
+    scope: 'TEXT', facts: 'TEXT', import_draft_id: 'TEXT',
   };
   for (const [name, type] of Object.entries(additions)) if (!columns.has(name)) db.exec(`ALTER TABLE knowledge_items ADD COLUMN ${name} ${type}`);
   db.exec("UPDATE knowledge_items SET reviewed_at = updated_at WHERE status = 'confirmed' AND reviewed_at IS NULL");
@@ -298,13 +318,14 @@ function migrateKnowledge(db: DatabaseSyncType) {
       OR NEW.source_excerpt IS NOT OLD.source_excerpt OR NEW.valid_from IS NOT OLD.valid_from
       OR NEW.valid_until IS NOT OLD.valid_until OR NEW.status IS NOT OLD.status OR NEW.reviewed_at IS NOT OLD.reviewed_at
       OR NEW.reviewed_by IS NOT OLD.reviewed_by
+      OR NEW.scope IS NOT OLD.scope OR NEW.facts IS NOT OLD.facts
     BEGIN
       INSERT OR IGNORE INTO knowledge_item_versions(item_id,version,snapshot)
       VALUES (OLD.id,OLD.version,json_object('id',OLD.id,'version',OLD.version,'question',OLD.question,'answer',OLD.answer,
         'category_id',OLD.category_id,'aliases',json(OLD.aliases),'source_name',OLD.source_name,'source_url',OLD.source_url,
         'source_level',OLD.source_level,'source_excerpt',OLD.source_excerpt,'valid_from',OLD.valid_from,'valid_until',OLD.valid_until,
         'supersedes',OLD.supersedes,'origin_event_id',OLD.origin_event_id,'created_at',OLD.created_at,'updated_at',OLD.updated_at,
-        'status',OLD.status,'reviewed_at',OLD.reviewed_at,'reviewed_by',OLD.reviewed_by));
+        'status',OLD.status,'reviewed_at',OLD.reviewed_at,'reviewed_by',OLD.reviewed_by,'scope',json(OLD.scope),'facts',json(OLD.facts),'import_draft_id',OLD.import_draft_id));
       UPDATE knowledge_items SET version = OLD.version + 1 WHERE id = OLD.id;
     END`);
 }
@@ -364,9 +385,22 @@ export function getLocalDb(): LocalDb {
   const schema = readFileSync(join(process.cwd(), 'local', 'schema.sql'), 'utf8');
   db.exec(schema);
   migrateEventSourceColumns(db);
+  migrateNoticeContacts(db);
+  const publicContactColumns = new Set((db.prepare('PRAGMA table_info(contacts)').all() as { name: string }[]).map(row => row.name));
+  for (const [name, type] of Object.entries({ notice_import_id: 'TEXT REFERENCES knowledge_imports(id)', reviewed_by: 'TEXT', reviewed_at: 'TEXT', reviewed_scope: 'TEXT', review_status: "TEXT NOT NULL DEFAULT 'pending'" })) {
+    if (!publicContactColumns.has(name)) db.exec(`ALTER TABLE contacts ADD COLUMN ${identifier(name)} ${type}`);
+  }
+  const importColumns = new Set((db.prepare('PRAGMA table_info(knowledge_imports)').all() as { name: string }[]).map(row => row.name));
+  if (!importColumns.has('contacts_version')) db.exec('ALTER TABLE knowledge_imports ADD COLUMN contacts_version INTEGER NOT NULL DEFAULT 0');
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS contacts_public_identity_idx ON contacts(notice_import_id,lower(coalesce(email,'')),coalesce(phone,''),name) WHERE scope='import'");
   migrateLegacyKnowledgeStatus(db, schema);
   migrateChatLogs(db);
+  const conversationColumns = (db.prepare('PRAGMA table_info(conversations)').all() as { name: string }[]).map(row => row.name);
+  if (!conversationColumns.includes('topic_context')) db.exec('ALTER TABLE conversations ADD COLUMN topic_context TEXT');
   migrateKnowledge(db);
+  const ticketColumns = (db.prepare('PRAGMA table_info(tickets)').all() as { name: string }[]).map(row => row.name);
+  if (!ticketColumns.includes('reply_version')) db.exec('ALTER TABLE tickets ADD COLUMN reply_version INTEGER NOT NULL DEFAULT 0');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS knowledge_import_draft_unique ON knowledge_items(import_draft_id) WHERE import_draft_id IS NOT NULL');
   migrateArticleMetadata(db, schema);
   const count = db.prepare('SELECT count(*) AS n FROM categories').get() as { n: number };
   if (count.n === 0) db.exec(readFileSync(join(process.cwd(), 'supabase', 'seed.sql'), 'utf8'));

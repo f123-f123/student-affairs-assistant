@@ -1,7 +1,8 @@
-import type { EventDraft, EventMaterial } from './types';
-import { resolveDeadline } from './event-date';
+import type { EventDraft, EventMaterial, PublicationDateCandidate } from './types';
+import { analyzeNoticeDeadline } from './event-date';
+import { noticeAudience } from './notice-scope';
 
-export function parseEventExtraction(raw: string, sourceText: string, publishDate: string | null, sourceUrl: string | null): EventDraft {
+export function parseEventExtraction(raw: string, sourceText: string, publishDate: string | null, sourceUrl: string | null, candidates: PublicationDateCandidate[] = []): EventDraft {
   const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   let data: unknown;
   try { data = JSON.parse(cleaned); } catch { throw new Error('invalid_extraction'); }
@@ -21,10 +22,12 @@ export function parseEventExtraction(raw: string, sourceText: string, publishDat
     return { name: material.name.trim(), source_text: material.source_text.trim(), done: false };
   }).filter(item => item.name);
   const evidence = fields.deadline_source_text?.trim() || null;
-  const resolved = resolveDeadline(sourceText, evidence, publishDate);
+  const resolved = analyzeNoticeDeadline(sourceText, evidence, publishDate, candidates);
+  const audience = noticeAudience(sourceText);
+  const eligibility = fields.eligibility.trim();
   return {
-    title, summary: fields.summary.trim(), eligibility: fields.eligibility.trim(), submit_to: fields.submit_to.trim(),
+    title, summary: fields.summary.trim(), eligibility: audience && !eligibility.includes(audience.replace(/^各位/, '')) ? `${audience}。${eligibility}` : eligibility, submit_to: fields.submit_to.trim(),
     deadline: resolved.deadline, deadline_source_text: resolved.evidence, deadline_inferred: resolved.inferred,
-    materials, source_url: sourceUrl, source_text: sourceText, publish_date: publishDate,
+    materials, source_url: sourceUrl, source_text: sourceText, publish_date: resolved.publishDate, date_context: resolved.context,
   };
 }

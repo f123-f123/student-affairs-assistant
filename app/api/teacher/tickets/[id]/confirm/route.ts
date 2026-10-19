@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getSupabase } from '@/lib/supabase';
 import { UUID_RE, textField } from '@/lib/validation';
+import { replyFingerprint } from '@/lib/reply-fingerprint';
+import { requireTeacher } from '@/lib/auth';
 import { badRequest, noStore, serviceUnavailable, teacherAuthorized, unauthorized } from '@/lib/teacher-api';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  if (!await teacherAuthorized()) return unauthorized();
+  const user = await requireTeacher(); if (!user) return unauthorized();
   const { id } = await context.params;
   if (!UUID_RE.test(id)) return badRequest('工单编号无效');
   let input: unknown;
@@ -23,10 +25,17 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   }
   try {
     const db = getSupabase();
-    const result = await db.rpc('confirm_ticket_knowledge', {
+    const ticket = await db.from('tickets').select('teacher_reply,reply_version').eq('id', id).maybeSingle();
+    if (ticket.error) return serviceUnavailable();
+    if (!ticket.data || !ticket.data.teacher_reply || fields.reply_version !== ticket.data.reply_version ||
+      fields.reply_fingerprint !== replyFingerprint(id, ticket.data.reply_version, ticket.data.teacher_reply)) return badRequest('回复已变化或草稿未绑定已保存回复，请重新生成并审核', 409);
+    const result = await db.rpc('confirm_ticket_knowledge_checked', {
       p_ticket_id: id, p_question: question, p_answer: answer, p_category_id: categoryId,
       p_supersedes: supersedes ?? null,
+      p_expected_reply_version: fields.reply_version, p_actor: user.id,
+      p_expected_reply: ticket.data.teacher_reply,
     });
+    if (result.error?.message.includes('reply_version_conflict')) return badRequest('回复已被另一请求修改，请重新生成草稿', 409);
     if (result.error?.message.includes('already_sedimented')) return badRequest('该工单已入库，请勿重复提交', 409);
     if (result.error?.message.includes('invalid_supersedes')) return badRequest('替换条目已失效，请刷新后重选', 409);
     if (result.error?.message.includes('ticket_not_answered')) return badRequest('请先回复工单', 409);

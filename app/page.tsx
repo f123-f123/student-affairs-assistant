@@ -3,27 +3,20 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import SiteHeader from '@/app/components/SiteHeader';
+import ContactCard from '@/app/components/ContactCard';
+import NoticeContactGroups from '@/app/components/NoticeContactGroups';
+import { displayAnswer } from '@/lib/answer-display';
 import { conversationError, readConversationError } from '@/lib/conversation-errors';
 import type { PublicUser } from '@/lib/auth-core';
-import type { AskResponse, Contact } from '@/lib/types';
+import type { AskResponse } from '@/lib/types';
 
 const examples = ['在读证明怎么开？', '缓考怎么申请？', '宿舍报修找谁？'];
-const fallbackText = '这个问题我暂时无法确定，建议联系以下老师，或提交给老师。';
+const fallbackText = '这个问题暂时没有足够依据，可以查看当前负责人，或提交工单请老师确认。';
 type Message = { role: 'user'; text: string } | { role: 'assistant'; question: string; data?: AskResponse; error?: string; notice?: string };
 type HistoryEntry = { question: string; response?: AskResponse; error?: string };
 type Conversation = { id: string; title: string; created_at: string; updated_at: string };
 type UiFailure = { code: string; message: string };
 const activeConversationKey = (userId: string) => `student_active_conversation:${userId}`;
-
-function ContactCard({ contact }: { contact: Contact }) {
-  return <div className="content-card text-sm">
-    <div className="font-semibold">{contact.name} <span className="muted font-normal">{contact.role === 'teacher' ? '老师' : '学生负责人'}</span></div>
-    {contact.phone && <div className="mt-1">电话：<a href={`tel:${contact.phone}`}>{contact.phone}</a></div>}
-    {contact.email && <div>邮箱：<a href={`mailto:${contact.email}`}>{contact.email}</a></div>}
-    {contact.office && <div>办公地点：{contact.office}</div>}
-    {contact.office_hours && <div>办公时间：{contact.office_hours}</div>}
-  </div>;
-}
 
 export default function Home() {
   const [input, setInput] = useState('');
@@ -49,7 +42,11 @@ export default function Home() {
   const listController = useRef<AbortController | null>(null);
   const userIdRef = useRef('');
   const sending = useRef(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  const shell = useRef<HTMLDivElement>(null);
+  const stream = useRef<HTMLElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const nearBottom = useRef(true);
+  const forceScroll = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -74,7 +71,25 @@ export default function Home() {
     })();
     return () => { controller.abort(); listController.current?.abort(); historyController.current?.abort(); };
   }, []);
-  useEffect(() => { if (messages.length) bottom.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
+  useEffect(() => {
+    const element = stream.current;
+    if (element && (forceScroll.current || nearBottom.current)) element.scrollTop = element.scrollHeight;
+    forceScroll.current = false;
+  }, [messages, loading]);
+  useEffect(() => {
+    const keepBottom = () => { if (nearBottom.current && stream.current) stream.current.scrollTop = stream.current.scrollHeight; };
+    const resize = () => {
+      shell.current?.style.setProperty('--chat-height', `${window.visualViewport?.height || window.innerHeight}px`);
+      keepBottom();
+    };
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(keepBottom) : null;
+    if (content.current) observer?.observe(content.current);
+    window.visualViewport?.addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('scroll', resize);
+    window.addEventListener('resize', resize);
+    resize();
+    return () => { observer?.disconnect(); window.removeEventListener('resize', resize); window.visualViewport?.removeEventListener('resize', resize); window.visualViewport?.removeEventListener('scroll', resize); };
+  }, []);
 
   function isUiFailure(error: unknown): error is UiFailure {
     return !!error && typeof error === 'object' && 'code' in error && 'message' in error;
@@ -140,6 +155,7 @@ export default function Home() {
     const controller = new AbortController();
     historyController.current = controller;
     activeIdRef.current = id;
+    nearBottom.current = true;
     setActiveId(id);
     sessionStorage.setItem(activeConversationKey(userId), id);
     setMessages([]);
@@ -192,6 +208,7 @@ export default function Home() {
     const conversationId = activeIdRef.current;
     if (!question || question.length > 500 || sending.current || historyLoading || !conversationId) return;
     sending.current = true;
+    forceScroll.current = true;
     setLoading(true);
     setInput('');
     setMessages(current => [...current, { role: 'user', text: question }]);
@@ -243,17 +260,18 @@ export default function Home() {
     finally { setTicketLoading(false); }
   }
 
-  return <div className="app-shell"><SiteHeader conversationNav={{
+  return <div ref={shell} className="app-shell chat-shell"><SiteHeader conversationNav={{
     authenticated: !!user, loading: authLoading || listLoading, conversations, activeId,
     error: listError?.message, createError: createError?.message,
     creating: creatingConversation, disabled: loading || ticketLoading,
     onRetry: () => void loadConversations(), onCreate: () => void newConversation(), onSelect: id => loadHistory(id),
   }} /><main className="page-content home-content">
     <div className="home-grid"><div className="chat-layout">
-    <section className="chat-intro"><p className="eyebrow">学生事务 · 随时可问</p><h1>把复杂的校园事务，问清楚。</h1><p>依据已审核且有效的知识库回答，附上出处与负责人。个人保存的通知须经老师整理审核后才能成为公共依据。</p>
+    <section ref={stream} className="chat-stream" data-empty={!messages.length} aria-live="polite" aria-label="问答记录" onScroll={() => { const element = stream.current; if (element) nearBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; }}>
+    <div ref={content} className="chat-scroll-content">
+    {!messages.length && <section className="chat-intro"><p className="eyebrow">校园办事猿 · 随时可问</p><h1>把复杂的校园事务，问清楚。</h1><p>依据已审核且有效的知识库回答，附上出处与当前负责人。个人保存的通知须经老师整理审核后才能成为公共依据。</p>
       <nav className="quick-links" aria-label="常用功能"><Link href="/schedule">查看待办与截止事项 ↗</Link><Link href="/my">查看老师回复 ↗</Link><Link href="/add">从通知添加事项 ↗</Link></nav>
-    </section>
-    <section className="chat-stream" aria-live="polite" aria-label="问答记录">
+    </section>}
       {authError && <div className="notice notice-error" role="alert">{authError.message} {authError.code === 'UNAUTHENTICATED' ? <Link href="/login?next=%2F" className="underline">重新登录</Link> : <button type="button" className="underline" onClick={() => window.location.reload()}>重试身份检查</button>}</div>}
       {!authError && authLoading && <div className="notice" role="status">正在确认身份…</div>}
       {!authLoading && user && listLoading && <div className="notice" role="status">正在加载对话列表…</div>}
@@ -272,11 +290,13 @@ export default function Home() {
       {messages.map((message, index) => message.role === 'user'
         ? <div key={index} className="chat-message chat-message-user">{message.text}</div>
         : <div key={index} className="chat-message chat-message-assistant space-y-4">
-          <div className={message.error ? 'notice notice-error' : message.data?.answerable || message.notice ? 'notice' : 'notice notice-warning'} role={message.error ? 'alert' : 'status'}><b>{message.error ? '服务故障' : message.notice ? '提交成功' : message.data?.answerable ? '有依据的回答' : '知识不足'}</b><p className="mt-1 whitespace-pre-wrap">{message.error ?? message.notice ?? (message.data?.answerable ? message.data.answer : message.data?.notice || fallbackText)}</p></div>
+          <div className={message.error ? 'notice notice-error' : message.data?.answerable || message.notice ? 'notice' : 'notice notice-warning'} role={message.error ? 'alert' : 'status'}><b>{message.error ? '服务故障' : message.notice ? '提交成功' : message.data?.status ? ({ answered: '有依据的回答', no_knowledge: '没有相关知识', needs_scope: '请确认咨询范围', model_refused: '模型未能依据资料回答', validation_failed: '回答校验未通过' }[message.data.status]) : message.data?.answerable ? '有依据的回答' : '知识不足'}</b><p className="mt-1 answer-text">{message.error ?? message.notice ?? (message.data?.answerable ? displayAnswer(message.data.answer || '') : message.data?.notice || fallbackText)}</p></div>
+          {message.data?.status === 'needs_scope' && <div className="space-y-2">{message.data.scope_candidates?.map((candidate, i) => <div key={candidate.id} className="space-y-1"><button type="button" className="button-secondary text-left" disabled={loading || historyLoading || index !== messages.length - 1} onClick={() => void submit(`确认第${i + 1}项`)}>咨询第{i + 1}项：{candidate.label}</button><p className="muted text-sm">通知：{candidate.source_name}{candidate.source_url && <> · <a href={candidate.source_url} target="_blank" rel="noreferrer" className="underline">查看原文</a></>}</p>{candidate.notice_contact_groups?.length ? <NoticeContactGroups groups={candidate.notice_contact_groups} pending onRetry={() => loadHistory(activeId)} /> : message.data?.contacts_error ? <p className="notice notice-error">该通知联系人读取失败，请重新读取对话。</p> : <p className="muted text-sm">该候选尚未建立公共通知联系人关联，可提交工单咨询。</p>}</div>)}</div>}
           {message.data?.answerable && message.data.citations.length > 0 && <div className="flex flex-wrap gap-2 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
             {message.data.citations.map(citation => <div key={citation.id} className="citation-card space-y-2">
               <span className="pill">出处：{citation.source_name} · v{citation.version} · 更新于 {new Date(citation.updated_at).toLocaleDateString('zh-CN')}
                 {citation.source_level === 1 && <b className="ml-2">老师确认</b>}
+                {citation.source_level === 2 && <b className="ml-2">{/演示|虚构/.test(citation.source_name) ? '演示文件（虚构）' : '官方通知'}</b>}
               </span>
               <p className="citation-summary text-sm">依据摘要：{citation.source_excerpt || citation.answer}</p>
               {citation.source_url && <a href={citation.source_url} target="_blank" rel="noreferrer" className="block text-sm underline">查看原文 ↗</a>}
@@ -284,15 +304,17 @@ export default function Home() {
             </div>)}
           </div>}
           {message.data?.answerable && message.data.citations.some(citation => citation.source_url) && <Link href={`/add?url=${encodeURIComponent(message.data.citations.find(citation => citation.source_url)!.source_url!)}`} className="button-secondary">加入日程</Link>}
-          {message.data && <div className="space-y-2 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
-            <div className="font-semibold">相关负责人</div>
-            {message.data.contacts.length ? message.data.contacts.map(contact => <ContactCard key={contact.id} contact={contact} />) : <div className="muted">暂无负责人信息</div>}
+          {message.data?.notice_contact_groups?.length ? <NoticeContactGroups groups={message.data.notice_contact_groups} onRetry={() => loadHistory(activeId)} /> : message.data && message.data.status !== 'needs_scope' && <div className="space-y-2 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+            <div className="font-semibold">当前负责人</div>
+            {message.data.contact_scope_note && <p className="muted text-sm">{message.data.contact_scope_note}</p>}
+            {message.data.contacts_error ? <div className="notice notice-error" role="alert">负责人查询失败，请重试；当前无法确认是否已配置。<button type="button" className="underline" disabled={loading} onClick={() => loadHistory(activeId)}>重新读取当前负责人</button></div>
+              : message.data.contacts.length ? message.data.contacts.map(contact => <ContactCard key={contact.id} contact={contact} />) : <div className="muted">{message.data.category_id ? '该类别尚未配置负责人' : '尚未确定负责人类别'}，可提交工单请老师协助。</div>}
           </div>}
-          {message.data?.category_id && <button type="button" onClick={() => { setTicketTarget({ question: message.question, categoryId: message.data!.category_id }); setTicketError(''); }} className="button-secondary">{message.data.answerable ? '仍未解决？请老师确认' : '提交工单给老师'}</button>}
+          {message.data && <button type="button" onClick={() => { setTicketTarget({ question: message.question, categoryId: message.data!.category_id }); setTicketError(''); }} className="button-secondary">{message.data.answerable ? '仍未解决？请老师确认' : '提交工单给老师'}</button>}
           {message.error && <button type="button" disabled={loading} onClick={() => void submit(message.question)} className="button-secondary">重试提问</button>}
         </div>)}
       {loading && <div className="chat-message chat-message-assistant muted" role="status">正在查找已确认的知识…</div>}
-      <div ref={bottom} />
+    </div>
     </section>
     <div className="chat-composer-wrap"><form className="chat-composer" onSubmit={event => { event.preventDefault(); void submit(); }}>
       <div className={messages.length === 0 ? 'suggestions mobile-suggestions' : 'suggestions'}>{examples.map(example => <button key={example} type="button" disabled={loading || historyLoading || !!historyError || !activeId} onClick={() => void submit(example)}>{example}</button>)}</div>

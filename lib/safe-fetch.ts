@@ -5,6 +5,7 @@ import ipaddr from 'ipaddr.js';
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import { isDateOnly } from './validation';
+import { publicationDates, selectPublicationDate } from './notice-dates';
 import { NoticeFetchError } from './fetch-errors';
 import type { NoticeAttachment } from './types';
 export { FETCH_FAILURE, FETCH_TOO_LONG, FETCH_UNSUPPORTED } from './fetch-errors';
@@ -186,8 +187,11 @@ export function parseNoticeHtml(html: string, sourceUrl: string) {
     const sourceText = article?.textContent?.replace(/\s+/g, ' ').trim() || '';
     if (sourceText.length < 80) throw new NoticeFetchError('FETCH_UNSUPPORTED');
     if (sourceText.length > 20000) throw new NoticeFetchError('FETCH_TOO_LONG');
+    const dateCandidates = publicationDates(sourceText, dates.filter((value): value is string => !!value && isDateOnly(value.slice(0, 10)))
+      .map(value => ({ date: value.slice(0, 10), kind: 'page' as const, evidence: `网页发布日期元数据：${value}` })));
+    const selectedDate = selectPublicationDate(dateCandidates, null);
     return { title: article?.title?.trim() || document.title.trim() || '未命名文章', sourceText,
-      publishedDate: dates.map(value => value?.slice(0, 10)).find(isDateOnly) || null,
+      publishedDate: selectedDate.date, dateCandidates,
       completeness: 'body_only' as const, attachments,
       warning: attachments.length ? '仅已提取网页正文；附件尚未解析，整份通知资料不完整，请打开附件人工核对。' : '仅已提取网页正文，未解析附件；整份通知资料完整性未核验。',
     };

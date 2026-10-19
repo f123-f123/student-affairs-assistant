@@ -34,7 +34,7 @@ export function generateEventsIcs(items: StudentEvent[]): string {
       alarms: alarms.filter(alarm => typeof alarm.trigger !== 'number' || alarm.trigger <= deadline.getTime()),
     };
   });
-  const { error, value } = createEvents(events, { productId: 'Student Affairs Assistant', calName: '学生事务日程' });
+  const { error, value } = createEvents(events, { productId: '校园办事猿', calName: '校园办事猿日程' });
   if (error || !value) throw new Error('日历文件生成失败');
   // 用独立解析库回读，验证 VEVENT、UID 和提醒数量。
   const calendar = new ICAL.Component(ICAL.parse(value));

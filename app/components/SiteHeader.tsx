@@ -56,8 +56,8 @@ export default function SiteHeader({ teacher = false, conversationNav }: { teach
 
   return <>
     <header className="site-header"><div className="site-header-inner">
-      <Link className="brand" href={teacher ? '/teacher' : '/'} aria-label="学生事务助手首页">
-        <span className="brand-mark" aria-hidden="true">知</span><span>学生事务助手</span>
+      <Link className="brand" href={teacher ? '/teacher' : '/'} aria-label="校园办事猿首页">
+        <span className="brand-mark" aria-hidden="true">猿</span><span>校园办事猿</span>
       </Link>
       <div className="header-actions">
         <IdentityControls />

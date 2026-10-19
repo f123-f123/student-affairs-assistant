@@ -14,10 +14,10 @@ export default function TeacherHome() {
   async function load() {
     setLoading(true); setError('');
     try {
-      const [response, knowledge] = await Promise.all([fetch('/api/teacher/tickets', { cache: 'no-store' }), fetch('/api/teacher/knowledge', { cache: 'no-store' })]);
+      const [response, knowledge] = await Promise.all([fetch('/api/teacher/tickets', { cache: 'no-store' }), fetch('/api/teacher/knowledge/stats', { cache: 'no-store' })]);
       if (!response.ok) throw new Error();
       setTickets((await response.json() as { tickets: Ticket[] }).tickets);
-      if (knowledge.ok) setDraftCount(((await knowledge.json() as { items: { status: string }[] }).items).filter(item => item.status === 'draft').length);
+      if (knowledge.ok) { const counts = await knowledge.json(); setDraftCount((counts.draft_count || 0) + (counts.import_draft_count || 0)); }
     } catch { setError('工单暂时无法加载'); }
     finally { setLoading(false); }
   }

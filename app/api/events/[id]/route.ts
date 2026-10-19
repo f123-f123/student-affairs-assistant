@@ -4,6 +4,7 @@ import { parseEventInput, parseEventMaterials } from '@/lib/event-input';
 import { UUID_RE } from '@/lib/validation';
 import { getCurrentUser } from '@/lib/auth';
 import { unauthorized } from '@/lib/teacher-api';
+import { noticeSchemaMissing } from '@/lib/contact-storage';
 
 export const dynamic = 'force-dynamic';
 const headers = { 'Cache-Control': 'no-store' };
@@ -30,7 +31,14 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   } else return error('没有可更新的内容');
   try {
     const db = getSupabase();
+    if (changes.category_id) {
+      const category = await db.from('categories').select('id').eq('id', changes.category_id as string).maybeSingle();
+      if (category.error) throw category.error;
+      if (!category.data) return error('事项类别不存在');
+    }
+    if (fields.event !== undefined && changes.date_context) changes.publish_date_source = (changes.date_context as { basis: string }).basis;
     const result = await db.from('events').update(changes).eq('id', id).eq('device_id', user.id).select('id').maybeSingle();
+    if (noticeSchemaMissing(result.error)) return NextResponse.json({ error: '请先部署 migration_event_notice_context.sql 以保存日期依据', code: 'EVENT_NOTICE_SCHEMA_REQUIRED' }, { status: 503, headers });
     if (result.error) throw result.error;
     if (!result.data) return error('事项不存在', 404);
     return NextResponse.json({ ok: true }, { headers });

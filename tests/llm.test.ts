@@ -1,10 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { askModel } from '../lib/llm';
+import { askModel, generateOfficialKnowledge } from '../lib/llm';
+import type { ImportBatch } from '../lib/knowledge-import';
 import type { Category, KnowledgeItem } from '../lib/types';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe('DeepSeek 模型接口', () => {
+  it('官网整理只请求一版综合问答，保留范围和分项条件，不产生多个同义草稿', async () => {
+    vi.stubEnv('LLM_API_KEY', 'test-only-key'); vi.stubEnv('LLM_MODEL', 'test-model'); vi.stubEnv('LLM_PROVIDER', 'deepseek');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '{"drafts":[]}' } }] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await generateOfficialKnowledge({ title: '演示通知', source_text: '通知正文', date_candidates: [], attachments: [] } as unknown as ImportBatch, []);
+    const prompt = JSON.parse(fetchMock.mock.calls[0][1].body).messages[0].content;
+    expect(prompt).toContain('且仅为1条综合问答草稿'); expect(prompt).toContain('各自条件和数字不得混用');
+    expect(prompt).toContain('学院/学园、年级、年度、项目范围'); expect(prompt).not.toContain('至多8条');
+    expect(prompt).toContain('不要仅因未写年份在issues中要求老师确认');
+  });
   it.each([
     [new TypeError('fetch failed'), 'model_request_failed'],
     [new DOMException('request timed out', 'TimeoutError'), 'model_timeout'],
@@ -42,6 +53,8 @@ describe('DeepSeek 模型接口', () => {
     expect(body.response_format).toEqual({ type: 'json_object' });
     expect(body.messages[0].content).not.toContain('contacts');
     expect(body.messages[0].content).not.toContain('13800000001');
+    expect(body.messages[0].content).toContain('每一步单独一行');
+    expect(body.messages[0].content).toContain('合法转义 \\n');
   });
   it('模型只收到候选知识，不含个人通知或联系人', async () => {
     vi.stubEnv('LLM_PROVIDER', 'deepseek');

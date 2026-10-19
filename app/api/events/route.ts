@@ -5,6 +5,8 @@ import { getCurrentUser } from '@/lib/auth';
 import { unauthorized } from '@/lib/teacher-api';
 import { UUID_RE } from '@/lib/validation';
 import { databaseFailure } from '@/lib/database-failure';
+import { attachEventContacts, noticeSchemaMissing } from '@/lib/contact-storage';
+import type { StudentEvent } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 const headers = { 'Cache-Control': 'no-store' };
@@ -18,7 +20,7 @@ export async function GET() {
     const result = await db.from('events').select('*').eq('device_id', user.id)
       .order('deadline', { ascending: true, nullsFirst: false });
     if (result.error) throw result.error;
-    return NextResponse.json({ events: result.data }, { headers });
+    return NextResponse.json({ events: await attachEventContacts(db, (result.data || []) as StudentEvent[]) }, { headers });
   } catch (cause) { return databaseFailure('events.list', cause); }
 }
 
@@ -45,9 +47,15 @@ export async function POST(request: Request) {
       sourceFetchedAt = article.data.fetched_at;
     }
     const fetchedAt = sourceFetchedAt || (typeof fields.source_fetched_at === 'string' && Number.isFinite(Date.parse(fields.source_fetched_at)) ? fields.source_fetched_at : null);
-    const dateSource = fields.publish_date_source === 'page' || fields.publish_date_source === 'user' ? fields.publish_date_source : 'unknown';
+    if (event.category_id) {
+      const category = await db.from('categories').select('id').eq('id', event.category_id).maybeSingle();
+      if (category.error) throw category.error;
+      if (!category.data) return error('事项类别不存在');
+    }
+    const dateSource = event.date_context?.basis || (['page', 'signature', 'user'].includes(String(fields.publish_date_source)) ? fields.publish_date_source : 'unknown');
     const result = await db.from('events').insert({ ...event, device_id: user.id, source_article_id: sourceArticleId,
       source_fetched_at: fetchedAt, source_confirmed_at: new Date().toISOString(), publish_date_source: dateSource }).select('id').single();
+    if (noticeSchemaMissing(result.error)) return NextResponse.json({ error: '日期依据和通知联系人持久化需要先部署 migration_event_notice_context.sql', code: 'EVENT_NOTICE_SCHEMA_REQUIRED' }, { status: 503, headers });
     if (result.error) throw result.error;
     return NextResponse.json({ id: result.data.id }, { status: 201, headers });
   } catch { return error('服务暂时不可用', 503); }

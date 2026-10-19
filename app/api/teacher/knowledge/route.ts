@@ -5,17 +5,21 @@ import { badRequest, noStore, serviceUnavailable, teacherAuthorized, unauthorize
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request?: Request) {
   if (!await teacherAuthorized()) return unauthorized();
   try {
     const db = getSupabase();
+    const params = new URL(request?.url || 'http://localhost').searchParams;
+    const page = Math.max(1, Math.min(10000, Number(params.get('page')) || 1));
+    const status = params.get('status') || 'all';
+    let query = db.from('knowledge_items').select('id,category_id,question,answer,aliases,source_name,source_level,source_url,source_excerpt,valid_from,valid_until,supersedes,origin_event_id,version,reviewed_at,reviewed_by,status,updated_at,categories(name)', { count: 'exact' });
+    if (status !== 'all') query = query.in('status', status === 'inactive' ? ['inactive', 'superseded'] : status === 'confirmed' ? ['confirmed'] : ['draft']);
     const [categories, items] = await Promise.all([
       db.from('categories').select('id,name').order('sort_order'),
-      db.from('knowledge_items').select('id,category_id,question,answer,aliases,source_name,source_level,source_url,source_excerpt,valid_from,valid_until,supersedes,origin_event_id,version,reviewed_at,reviewed_by,status,updated_at,categories(name)')
-        .order('updated_at', { ascending: false }),
+      query.order('updated_at', { ascending: false }).order('id').range((page - 1) * 20, page * 20 - 1),
     ]);
     if (categories.error || items.error) return serviceUnavailable();
-    return NextResponse.json({ categories: categories.data, items: items.data }, { headers: noStore });
+    return NextResponse.json({ categories: categories.data, items: items.data, total: items.count, page, page_size: 20 }, { headers: noStore });
   } catch { return serviceUnavailable(); }
 }
 

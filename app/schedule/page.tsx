@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import EventEditor from '@/app/components/EventEditor';
 import SiteHeader from '@/app/components/SiteHeader';
+import EventContacts from '@/app/components/EventContacts';
+import { displayDate } from '@/lib/date-only';
 import { shanghaiDateTime } from '@/lib/event-date';
 import { eventStateLabels, getEventState, matchesScheduleFilter, scheduleFilters, type ScheduleFilter } from '@/lib/schedule';
 import type { EventDraft, EventMaterial, StudentEvent } from '@/lib/types';
@@ -17,6 +19,7 @@ export default function Schedule() {
   const [items, setItems] = useState<StudentEvent[]>([]);
   const [editing, setEditing] = useState<{ id: string; draft: EventDraft } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [editorValid, setEditorValid] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -81,17 +84,18 @@ export default function Schedule() {
       return <article key={item.id} className="content-card">
         <div className="flex flex-wrap items-start justify-between gap-2"><h2 className="text-xl font-semibold">{item.title}</h2><span className={`pill ${state === 'overdue' ? 'pill-error' : state === 'soon' ? 'pill-warning' : ''}`}>{eventStateLabels[state]}</span></div>
         <p className="muted mt-2 text-sm">{item.deadline ? `截止：${shanghaiDateTime(item.deadline)}（上海时间）` : '无截止时间'}{item.deadline_inferred && ' · 由相对日期推算'}</p>
-        {(item.publish_date || item.source_fetched_at || item.source_confirmed_at) && <p className="muted mt-1 text-sm">发布时间：{item.publish_date || '未确认'} · 获取时间：{item.source_fetched_at ? shanghaiDateTime(item.source_fetched_at) : '手动录入'} · 确认时间：{item.source_confirmed_at ? shanghaiDateTime(item.source_confirmed_at) : '历史事项未记录'}</p>}
+        {(item.publish_date || item.source_fetched_at || item.source_confirmed_at) && <p className="muted mt-1 text-sm">发布时间：{displayDate(item.publish_date)} · 获取时间：{item.source_fetched_at ? shanghaiDateTime(item.source_fetched_at) : '手动录入'} · 确认时间：{item.source_confirmed_at ? shanghaiDateTime(item.source_confirmed_at) : '历史事项未记录'}</p>}
         {item.summary && <p className="mt-2 text-sm">{item.summary}</p>}
         {item.eligibility && <p className="mt-1 text-sm">适用：{item.eligibility}</p>}
         {item.submit_to && <p className="mt-1 text-sm">提交：{item.submit_to}</p>}
         {item.source_url && <a href={item.source_url} target="_blank" rel="noreferrer" className="mt-3 inline-block break-all text-sm">查看原通知 ↗</a>}
+        <div className="mt-3"><EventContacts value={editable(item)} /></div>
         <div className="mt-4 border-t pt-4 text-sm" style={{ borderColor: 'var(--border)' }}><b>材料进度：{done}/{item.materials.length}</b>
           {item.materials.map((material, index) => <label key={index} className="mt-2 flex min-h-11 items-center gap-2"><input type="checkbox" checked={material.done} disabled={busy} onChange={() => checkMaterial(item, index)} />{material.name}</label>)}
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
             {item.deadline && item.status === 'active' && <a href={exportUrl(item.id)} className="button-secondary">导出 .ics</a>}
-          <button type="button" disabled={busy} onClick={() => { setEditing({ id: item.id, draft: editable(item) }); setConfirmed(false); }} className="button-secondary">编辑</button>
+          <button type="button" disabled={busy} onClick={() => { setEditing({ id: item.id, draft: editable(item) }); setConfirmed(false); setEditorValid(true); }} className="button-secondary">编辑</button>
           <button type="button" disabled={busy} onClick={() => void update(item.id, { status: item.status === 'done' ? 'active' : 'done' })} className="button-quiet">{item.status === 'done' ? '重启' : '标记完成'}</button>
           <button type="button" disabled={busy} onClick={() => void update(item.id, { status: item.status === 'archived' ? 'active' : 'archived' })} className="button-quiet">{item.status === 'archived' ? '取消归档' : '归档'}</button>
           <button type="button" disabled={busy} onClick={() => void remove(item.id)} className="button-quiet" style={{ color: 'var(--error)' }}>删除</button>
@@ -101,9 +105,9 @@ export default function Schedule() {
     {!visible.length && !error && <div className="empty-state"><h2>{items.length ? '这个筛选下没有事项' : '日程还是空的'}</h2><p>{items.length ? '可以切换筛选查看其他事项。' : '从一条通知开始，整理截止时间和所需材料。'}</p><Link href="/add" className="button-primary">添加事项</Link></div>}</div>}
     {editing && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-title">
       <div className="modal-panel space-y-4"><h2 id="edit-title" className="text-xl font-bold">编辑事项</h2>
-        <EventEditor value={editing.draft} onChange={draft => setEditing({ ...editing, draft })} confirmed={confirmed} onConfirm={setConfirmed} />
+        <EventEditor value={editing.draft} onChange={draft => setEditing({ ...editing, draft })} confirmed={confirmed} onConfirm={setConfirmed} onDateValidityChange={setEditorValid} />
         <div className="flex justify-end gap-3"><button type="button" onClick={() => setEditing(null)} className="button-quiet">取消</button>
-          <button type="button" disabled={busy || !confirmed} onClick={() => void update(editing.id, { event: editing.draft, deadline_confirmed: !!editing.draft.deadline && confirmed, no_deadline_confirmed: !editing.draft.deadline && confirmed })} className="button-primary">保存修改</button></div>
+          <button type="button" disabled={busy || !confirmed || !editorValid} onClick={() => void update(editing.id, { event: editing.draft, deadline_confirmed: !!editing.draft.deadline && confirmed, no_deadline_confirmed: !editing.draft.deadline && confirmed })} className="button-primary">保存修改</button></div>
       </div>
     </div>}
   </main></div>;

@@ -1,14 +1,19 @@
 import { NextResponse } from 'next/server';
 import { askModel } from '@/lib/llm';
 import { getSupabase, safeDatabaseError } from '@/lib/supabase';
-import { validateAnswer } from '@/lib/answer-validation';
+import { qualifyAnswerScope, validateAnswer } from '@/lib/answer-validation';
 import { retrieveKnowledge } from '@/lib/knowledge-search';
-import type { AskResponse, Category, Contact, KnowledgeItem } from '@/lib/types';
+import type { AskResponse, Category, KnowledgeItem } from '@/lib/types';
+import { withCurrentContacts } from '@/lib/answer-contacts';
 import { UUID_RE } from '@/lib/validation';
 import { getCurrentUser } from '@/lib/auth';
 import { conversationError } from '@/lib/conversation-errors';
 import { databaseFailure } from '@/lib/database-failure';
-import { retrievalQuestion } from '@/lib/followup-question';
+import { isTopicFollowup, retrievalQuestion, topicFromHistory } from '@/lib/followup-question';
+import { stageTiming } from '@/lib/stage-timing';
+import { shanghaiDateTime } from '@/lib/event-date';
+import { assessKnowledgeScope, knowledgeScope } from '@/lib/knowledge-scope';
+import { scopeClarification, scopeReply } from '@/lib/ask-scope';
 
 export const dynamic = 'force-dynamic';
 
@@ -53,6 +58,9 @@ export async function GET(request: Request) {
       }
       return { question: row.question, error: '旧记录未保存回答内容', created_at: row.created_at };
     });
+    const entries = history.filter((entry): entry is HistoryEntry & { response: AskResponse } => !!entry.response);
+    const current = await withCurrentContacts(db, entries.map(entry => entry.response));
+    entries.forEach((entry, index) => { entry.response = current[index]; });
     return NextResponse.json({ history }, { headers });
   } catch (error) { return serviceError('database_read_failed', error); }
 }
@@ -79,70 +87,99 @@ export async function POST(request: Request) {
   try { db = getSupabase(); } catch (error) { return serviceError('database_connect_failed', error); }
 
   try {
-    const owner = await db.from('conversations').select('id,title').eq('id', conversationId).eq('device_id', deviceId).maybeSingle();
+    const owner = await db.from('conversations').select('*').eq('id', conversationId).eq('device_id', deviceId).maybeSingle();
     if (owner.error) throw owner.error;
     if (!owner.data) return NextResponse.json({ error: '对话不存在', code: 'NOT_FOUND' }, { status: 404, headers });
     const title = owner.data.title;
-    return await answerInConversation(db, question, deviceId, conversationId, title);
+    return await answerInConversation(db, question, deviceId, conversationId, title, owner.data.topic_context, Object.hasOwn(owner.data, 'topic_context'));
   } catch (error) { return serviceError('database_read_failed', error); }
 }
 
-async function answerInConversation(db: ReturnType<typeof getSupabase>, question: string, deviceId: string, conversationId: string, currentTitle: string) {
+async function answerInConversation(db: ReturnType<typeof getSupabase>, question: string, deviceId: string, conversationId: string, currentTitle: string, topicContext?: AskResponse['topic_context'] | null, hasTopicColumn = false) {
+  const timing = stageTiming('ask');
+  let nextTopic: NonNullable<AskResponse['topic_context']> = { question: isTopicFollowup(question) && topicContext?.question ? topicContext.question : question };
   let categoryId: string | null = null;
   let citedIds: string[] = [];
   let answerable = false;
   try {
     // 每次请求实时读取；inactive 替换关系只用于阻止旧政策重新出现，从不作为回答候选。
-    const [categoriesResult, itemsResult, previousResult] = await Promise.all([
+    const readItems = async () => {
+      const fields = 'id,category_id,question,answer,aliases,source_level,source_name,source_url,source_excerpt,valid_from,valid_until,supersedes,status,version,updated_at,categories(name)';
+      const query = (select: string) => db.from('knowledge_items').select(select).in('status', ['confirmed', 'inactive']).order('source_level', { ascending: true }).order('updated_at', { ascending: false });
+      const result = await query(`${fields},scope,facts`);
+      return ['42703', 'PGRST204'].includes(String(result.error?.code)) ? await query(fields) : result;
+    };
+    const [categoriesResult, itemsResult, previousResult] = await timing.run('read', () => Promise.all([
       db.from('categories').select('id,name,description,sort_order').order('sort_order'),
-      db.from('knowledge_items').select('id,category_id,question,answer,aliases,source_level,source_name,source_url,source_excerpt,valid_from,valid_until,supersedes,status,version,updated_at,categories(name)')
-        .in('status', ['confirmed', 'inactive']).order('source_level', { ascending: true }).order('updated_at', { ascending: false }),
-      db.from('chat_logs').select('question').eq('device_id', deviceId).eq('conversation_id', conversationId)
-        .order('created_at', { ascending: false }).limit(3),
-    ]);
+      readItems(),
+      topicContext?.question || !isTopicFollowup(question) ? Promise.resolve({ data: [], error: null }) : db.from('chat_logs').select('question,response_json').eq('device_id', deviceId).eq('conversation_id', conversationId)
+        .order('created_at', { ascending: false }).limit(8),
+    ]));
     if (categoriesResult.error || itemsResult.error || previousResult.error) throw categoriesResult.error || itemsResult.error || previousResult.error;
     const categories = (categoriesResult.data ?? []) as Category[];
-    const previousQuestion = previousResult.data?.length
-      ? previousResult.data.map(row => row.question as string).reverse().join('；') : null;
-    const searchQuestion = retrievalQuestion(question, previousQuestion);
-    const items = retrieveKnowledge(searchQuestion, (itemsResult.data ?? []) as unknown as KnowledgeItem[], categories);
-    const raw = categories.length && items.length ? await askModel(question, categories, items, searchQuestion === question ? null : previousQuestion) : JSON.stringify({ answerable: false, answer: '', citations: [], category: null });
-    const result = validateAnswer(raw, items, categories);
+    const previousQuestion = topicContext?.question || topicFromHistory(previousResult.data || []);
+    const allItems = (itemsResult.data ?? []) as unknown as KnowledgeItem[];
+    const reply = scopeReply(question, topicContext, allItems);
+    const searchQuestion = reply?.query || retrievalQuestion(question, previousQuestion);
+    nextTopic = { question: reply ? searchQuestion : searchQuestion === question ? question : previousQuestion! };
+    // 先召回相关知识，再分别判断冲突、范围缺失和可直接使用的候选。
+    const retrieved = retrieveKnowledge(searchQuestion, allItems, categories, new Date(), 32, 48000);
+    const scoped = retrieved.map(item => ({ item, assessment: assessKnowledgeScope(searchQuestion, item) }));
+    const compatible = scoped.filter(entry => entry.assessment.state !== 'conflict');
+    const matched = compatible.filter(entry => entry.assessment.state === 'match');
+    const needsScope = compatible[0]?.assessment.state === 'missing' && !matched.some(entry => knowledgeScope(entry.item));
+    const items = needsScope ? [] : retrieveKnowledge(searchQuestion, matched.map(entry => entry.item), categories);
+    const clarification = needsScope ? scopeClarification(compatible.filter(entry => entry.assessment.state === 'missing').map(entry => entry.item), searchQuestion) : null;
+    if (clarification) nextTopic = { question: searchQuestion, scope_candidates: clarification.scope_candidates?.map(({ id, version }) => ({ id, version })) };
+    const deadlines = items.filter(item => item.facts?.deadline);
+    const onlyDeadline = deadlines.length && new Set(deadlines.map(i => i.facts!.deadline)).size === 1 ? deadlines[0] : null;
+    const modelQuestion = reply?.accepted ? topicContext!.question : question;
+    const deadlineQuestion = /什么时候截止|何时截止|截止时间|截止日期|截止了吗/.test(modelQuestion) || /^(?:那|现在)?还能申请(?:吗|么|不)?[？?]?$/.test(modelQuestion);
+    const factual = onlyDeadline && deadlineQuestion ? { answerable: true,
+      answer: `${onlyDeadline.scope ? [ ...onlyDeadline.scope.units, ...onlyDeadline.scope.cohorts, ...onlyDeadline.scope.years, ...onlyDeadline.scope.projects ].join('、') : '该通知'}的申请截止时间为${shanghaiDateTime(onlyDeadline.facts!.deadline).replace(/(\d{4})\/(\d{2})\/(\d{2})/, '$1年$2月$3日')}（上海时间）。${Date.now() > Date.parse(onlyDeadline.facts!.deadline) ? '该截止时间已过；不能据此推断允许补报，请核对原通知或咨询负责人。' : '是否符合申请条件仍需核对该通知的适用范围。'}`,
+      citations: [onlyDeadline.id], category: onlyDeadline.category_id } : null;
+    const raw = factual ? JSON.stringify(factual) : categories.length && items.length ? await timing.run('model', () => askModel(modelQuestion, categories, items, searchQuestion === question ? null : searchQuestion)) : JSON.stringify({ answerable: false, answer: '', citations: [], category: null });
+    const result = validateAnswer(qualifyAnswerScope(raw, items), items, categories);
     categoryId = result.category || null;
     answerable = result.answerable;
     citedIds = result.citations;
-    const contactsResult = categoryId ? await db.from('contacts')
-      .select('id,name,role,phone,email,office,office_hours')
-      .eq('category_id', categoryId).order('role') : { data: [], error: null };
-    if (contactsResult.error) throw contactsResult.error;
-    const contacts = (contactsResult.data ?? []) as Contact[];
+    const status: NonNullable<AskResponse['status']> = needsScope ? 'needs_scope' : !items.length ? 'no_knowledge' : result.errorType ? 'validation_failed' : answerable ? 'answered' : 'model_refused';
+    const reasonCode = { answered: 'ANSWERED', needs_scope: 'SCOPE_REQUIRED', no_knowledge: retrieved.length ? 'SCOPE_CONFLICT' : 'NO_RELEVANT_KNOWLEDGE', model_refused: 'MODEL_REFUSED', validation_failed: 'ANSWER_VALIDATION_FAILED' }[status];
+    if (needsScope) { const ids = [...new Set(compatible.map(entry => entry.item.category_id))]; categoryId = ids.length === 1 ? ids[0] : null; }
     const citations = citedIds.map(id => {
-      const { source_name, source_level, source_url, source_excerpt, updated_at, question, answer, version } = items.find(item => item.id === id)!;
-      return { id, source_name, source_level, source_url, source_excerpt: source_excerpt ?? null, updated_at, question, answer, version: version ?? 1 };
+      const { category_id, source_name, source_level, source_url, source_excerpt, updated_at, question, answer, version } = items.find(item => item.id === id)!;
+      return { id, category_id, source_name, source_level, source_url, source_excerpt: source_excerpt ?? null, updated_at, question, answer, version: version ?? 1 };
     });
-    const response: AskResponse = { answerable, ...(answerable ? { answer: result.answer } : {}), citations, contacts, category_id: categoryId,
-      ...(!categories.length ? { notice: '知识库尚未配置基础分类，暂时无法提供办事依据，请由管理员初始化分类。' }
-        : !items.length ? { notice: '当前没有与该问题匹配的有效已审核知识，暂时无法给出有依据的回答；可以提交工单请老师确认。' } : {}),
-    };
-    const logResult = await db.from('chat_logs').insert({
+    const notice = clarification?.notice || (!categories.length ? '知识库尚未配置基础分类，请联系管理员。'
+      : status === 'no_knowledge' ? retrieved.length ? '找到的相关通知与你明确提供的范围冲突，不能套用；目前没有适用的已审核知识，可提交工单咨询。' : '当前没有与该问题相关的有效已审核知识，可以提交工单请老师确认。'
+        : status === 'model_refused' ? '已找到适用范围匹配的知识，但模型判断现有依据不足以回答这个具体问题；可以换一种问法或提交工单。'
+          : status === 'validation_failed' ? '模型生成的回答未通过事实或引用校验，已拦截该回答；可以重试或提交工单。' : undefined);
+    const [response] = await timing.run('contacts', () => withCurrentContacts(db, [{ answerable, status, reason_code: reasonCode,
+      ...(result.errorType ? { validation_error: result.errorType } : {}), ...(answerable ? { answer: result.answer } : {}),
+      ...(notice ? { notice } : {}), ...(clarification ? { scope_candidates: clarification.scope_candidates } : {}), citations, contacts: [], category_id: categoryId,
+      topic_context: nextTopic,
+    }], { categories, itemCategories: new Map(items.map(item => [item.id, item.category_id])) }));
+    categoryId = response.category_id;
+    const writes = await timing.run('write', () => Promise.all([db.from('chat_logs').insert({
       device_id: deviceId, conversation_id: conversationId, question, answerable, category_id: categoryId,
-      cited_item_ids: citedIds, error_type: result.errorType, response_json: response,
-    });
-    if (logResult.error) throw logResult.error;
+      cited_item_ids: citedIds, error_type: result.errorType || (status === 'answered' ? null : reasonCode.toLowerCase()), response_json: response,
+    }),
     // 首问用问题命名，后续提问仅更新排序时间。
-    await db.from('conversations').update({
+    db.from('conversations').update({
       updated_at: new Date().toISOString(),
+      ...(hasTopicColumn ? { topic_context: response.topic_context } : {}),
       ...(currentTitle === '新对话' ? { title: question.slice(0, 30) } : {}),
-    }).eq('id', conversationId).eq('device_id', deviceId);
-    return NextResponse.json(response, { headers });
+    }).eq('id', conversationId).eq('device_id', deviceId)]));
+    if (writes.some(write => write.error)) throw writes.find(write => write.error)!.error;
+    return NextResponse.json(response, { headers: { ...headers, 'Server-Timing': timing.finish() } });
   } catch (error) {
     const errorType = error instanceof Error && /^(database_|model_)/.test(error.message)
       ? error.message : error && typeof error === 'object' && 'code' in error ? 'database_query_failed' : 'service_failed';
     // 故障也尽力记日志；日志失败不掩盖原始服务错误。
-    await db.from('chat_logs').insert({
+    await Promise.all([db.from('chat_logs').insert({
       device_id: deviceId, conversation_id: conversationId, question, answerable: false, category_id: categoryId,
       cited_item_ids: [], error_type: errorType,
-    }).then(() => {}, () => {});
+    }), ...(hasTopicColumn ? [db.from('conversations').update({ topic_context: nextTopic, updated_at: new Date().toISOString() }).eq('id', conversationId).eq('device_id', deviceId)] : [])]).then(() => {}, () => {});
     return serviceError(errorType, error);
   }
 }

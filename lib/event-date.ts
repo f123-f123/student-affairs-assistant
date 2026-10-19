@@ -1,4 +1,6 @@
 import { isDateOnly } from './validation';
+import { publicationDates, selectPublicationDate, deadlineEvidenceCandidates } from './notice-dates';
+import type { EventDraft, EventDateContext, PublicationDateCandidate } from './types';
 
 export type ResolvedDeadline = { deadline: string | null; inferred: boolean; evidence: string | null };
 
@@ -9,7 +11,42 @@ export function shanghaiToday(now = new Date()): string {
 }
 
 export function shanghaiDateTime(iso: string): string {
-  return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso));
+  return shanghaiInput(iso).replaceAll('-', '/').replace('T', ' ');
+}
+
+export function analyzeNoticeDeadline(source: string, evidence: string | null, userDate: string | null, page: PublicationDateCandidate[] = [], cleared = false) {
+  const candidates = publicationDates(source, page);
+  const selected = cleared ? { date: null, kind: 'unknown' as const, conflict: false } : selectPublicationDate(candidates, userDate);
+  const fallback = deadlineEvidenceCandidates(source);
+  const invalidEvidence = !!evidence && !source.includes(evidence);
+  const selectedEvidence = invalidEvidence ? null : evidence || (fallback.length === 1 ? fallback[0] : null);
+  const resolved = resolveDeadline(source, selectedEvidence, selected.date);
+  let state: EventDateContext['state'] = invalidEvidence ? 'invalid' : selected.conflict || !selectedEvidence && fallback.length > 1 ? 'conflict'
+    : !selectedEvidence ? 'none' : resolved.deadline ? 'resolved'
+      : [...selectedEvidence.matchAll(/(?:(\d{4})[年./-])?\s*\d{1,2}[月./-]\s*\d{1,2}/g)].length > 1 ? 'conflict'
+        : !selected.date && /(?<!\d)\d{1,2}月\s*\d{1,2}|本周|下周|下月/.test(selectedEvidence) && !/\d{4}年/.test(selectedEvidence) ? 'year_required' : 'invalid';
+  if (resolved.deadline && selectedEvidence) {
+    const weekday = /[（(](?:周|星期)([一二三四五六日天])[）)]/.exec(selectedEvidence);
+    if (weekday) {
+      const day = new Date(`${shanghaiInput(resolved.deadline).slice(0, 10)}T00:00:00Z`).getUTCDay();
+      const expected = weekday[1] === '天' ? 0 : '日一二三四五六'.indexOf(weekday[1]);
+      if (day !== expected) state = 'conflict';
+    }
+  }
+  return { deadline: state === 'resolved' ? resolved.deadline : null, inferred: state === 'resolved' && resolved.inferred,
+    evidence: selectedEvidence, publishDate: selected.date, context: { candidates, basis: selected.kind, state, mode: 'parsed' as const, ...(cleared ? { publication_cleared: true } : {}) } };
+}
+
+export function reparseDraftDates(value: EventDraft, patch: Partial<EventDraft>, adopt = false): EventDraft {
+  const next = { ...value, ...patch };
+  const manual = (value.date_context?.mode === 'manual' || !value.date_context && !!value.deadline) && !adopt;
+  const cleared = Object.hasOwn(patch, 'publish_date') ? !patch.publish_date : !!value.date_context?.publication_cleared;
+  const explicitDate = Object.hasOwn(patch, 'publish_date') ? patch.publish_date || null : !value.date_context || value.date_context.basis === 'user' ? next.publish_date : null;
+  const result = analyzeNoticeDeadline(next.source_text, next.deadline_source_text, explicitDate, next.date_context?.candidates.filter(candidate => candidate.kind === 'page') || [], cleared);
+  return { ...next, publish_date: result.publishDate, deadline: manual ? value.deadline : result.deadline,
+    deadline_inferred: manual ? value.deadline_inferred : result.inferred,
+    deadline_source_text: Object.hasOwn(patch, 'deadline_source_text') ? patch.deadline_source_text || null : result.evidence,
+    date_context: { ...result.context, mode: manual ? 'manual' : 'parsed', suggested_deadline: result.deadline } };
 }
 
 export function shanghaiInput(iso: string): string {

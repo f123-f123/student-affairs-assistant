@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import SiteHeader from '@/app/components/SiteHeader';
+import TeacherContacts, { CategoryContacts, type ContactsState } from '@/app/components/TeacherContacts';
 
 type Category = { id: string; name: string };
 type Item = { id: string; category_id: string; question: string; answer: string; source_name: string; source_level: number; source_url: string | null; source_excerpt: string | null; aliases: string[]; valid_from: string | null; valid_until: string | null; supersedes: string | null; origin_event_id: string | null; status: string; version: number; reviewed_at: string | null; reviewed_by: string | null; updated_at: string; categories: { name: string } | null };
@@ -10,6 +12,7 @@ export default function TeacherKnowledge() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [categoryId, setCategoryId] = useState('');
+  const [contactState, setContactState] = useState<ContactsState>({ contacts: [], loading: true, error: '' });
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
@@ -26,16 +29,23 @@ export default function TeacherKnowledge() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [filter, setFilter] = useState<'draft' | 'all' | 'confirmed' | 'inactive'>('draft');
+  const [page, setPage] = useState(1), [total, setTotal] = useState(0);
 
-  async function load() {
-    const response = await fetch('/api/teacher/knowledge', { cache: 'no-store' });
+  async function load(signal?: AbortSignal) {
+    const response = await fetch(`/api/teacher/knowledge?status=${filter}&page=${page}`, { cache: 'no-store', signal });
     if (!response.ok) throw new Error('知识库暂时无法加载');
-    const data = await response.json() as { categories: Category[]; items: Item[] };
+    const data = await response.json() as { categories: Category[]; items: Item[]; total: number };
+    if (signal?.aborted) return;
     setCategories(data.categories);
     setItems(data.items);
+    setTotal(data.total || 0);
     setCategoryId(current => current || data.categories[0]?.id || '');
   }
-  useEffect(() => { void load().catch(error => setMessage(error.message)).finally(() => setLoading(false)); }, []);
+  useEffect(() => {
+    const controller = new AbortController(); setLoading(true);
+    void load(controller.signal).catch(error => { if (!controller.signal.aborted) setMessage(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [page, filter]);
 
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -88,12 +98,13 @@ export default function TeacherKnowledge() {
   }
 
   return <div className="app-shell"><SiteHeader teacher /><main className="page-content reading-width space-y-6">
-    <div className="page-head"><p className="eyebrow">老师工作台</p><h1 className="page-title">知识库</h1><p className="page-description">保存草稿、核对依据，再审核发布。</p></div>
+    <div className="page-head"><p className="eyebrow">老师工作台</p><h1 className="page-title">知识库</h1><p className="page-description">保存草稿、核对依据，再审核发布。</p><Link href="/teacher/knowledge/import" className="button-primary mt-3">从官网导入</Link></div>
     <form onSubmit={event => void save(event)} className="panel space-y-4">
       <h2 className="text-xl font-semibold">{editing ? '编辑草稿' : supersedes ? '替换草稿' : '新增草稿'}</h2>
       <label className="field-label">类别<select className="field" value={categoryId} onChange={event => setCategoryId(event.target.value)} disabled={loading || saving}>
         {categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
       </select></label>
+      <CategoryContacts state={contactState} categoryId={categoryId} />
       <label className="field-label">通用问题<textarea className="field" value={question} onChange={event => setQuestion(event.target.value)} maxLength={500} rows={2} required /></label>
       <label className="field-label">确认后的答案<textarea className="field" value={answer} onChange={event => setAnswer(event.target.value)} maxLength={4000} rows={5} required /></label>
       <label className="field-label">来源链接（可选）<input className="field" type="url" value={sourceUrl} onChange={event => setSourceUrl(event.target.value)} placeholder="https://学校官网/通知" /></label>
@@ -106,12 +117,14 @@ export default function TeacherKnowledge() {
       <button type="submit" className="button-primary" disabled={loading || saving || !categoryId || !question.trim() || !answer.trim()}>{saving ? '保存中…' : '保存草稿'}</button>
       {message && <div role="status" className="notice">{message}{message === '知识库暂时无法加载' ? <button type="button" className="ml-2 underline" onClick={() => void load().then(() => setMessage('')).catch(error => setMessage(error.message))}>重试</button> : null}</div>}
     </form>
+    <TeacherContacts categories={categories} categoryId={categoryId} onChange={setContactState} />
     {history.length > 0 && <section className="panel space-y-2"><h2 className="font-semibold">历史版本</h2>{history.map(row => <div key={row.version} className="notice"><b>v{row.version} · {row.snapshot.status}</b><p>{row.snapshot.question}</p><p className="whitespace-pre-wrap">{row.snapshot.answer}</p><p>出处：{row.snapshot.source_name}</p></div>)}</section>}
-    <section id="knowledge-items" className="space-y-3"><h2 className="text-xl font-semibold">知识条目（{items.length}）</h2>
+    <section id="knowledge-items" className="space-y-3"><h2 className="text-xl font-semibold">知识条目（{total}）</h2>
       <p className="muted text-sm">草稿不会进入学生问答；发布后立即参与检索。停用或替换后，旧条目不再用于新回答，历史版本仍可查看。</p>
-      <div className="filter-row" role="group" aria-label="筛选知识状态">{([['draft', '待审核'], ['confirmed', '已发布'], ['inactive', '已停用或替换'], ['all', '全部']] as const).map(([value, label]) => <button key={value} type="button" className={filter === value ? 'button-secondary segment-active' : 'button-secondary'} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}{value === 'draft' ? `（${items.filter(item => item.status === 'draft').length}）` : ''}</button>)}</div>
+      <div className="filter-row" role="group" aria-label="筛选知识状态">{([['draft', '待审核'], ['confirmed', '已发布'], ['inactive', '已停用或替换'], ['all', '全部']] as const).map(([value, label]) => <button key={value} type="button" className={filter === value ? 'button-secondary segment-active' : 'button-secondary'} aria-pressed={filter === value} onClick={() => { setFilter(value); setPage(1); }}>{label}</button>)}</div>
+      <div className="flex items-center gap-3"><button className="button-secondary" disabled={loading || page === 1} onClick={() => setPage(p => p - 1)}>上一页</button><span>第 {page} 页 · 每页20条</span><button className="button-secondary" disabled={loading || page * 20 >= total} onClick={() => setPage(p => p + 1)}>下一页</button><Link href="/teacher/knowledge/import">审核官网导入草稿</Link></div>
       {loading ? <div className="skeleton" role="status" aria-label="正在加载知识条目" /> : items.filter(item => filter === 'all' || filter === 'inactive' && item.status !== 'draft' && item.status !== 'confirmed' || item.status === filter).map(item => <article key={item.id} className="content-card space-y-2">
-        <div className="flex flex-wrap gap-2 text-sm"><span className="pill">{item.categories?.name || '未分类'}</span><span className={item.status === 'draft' ? 'pill pill-warning' : 'pill'}>{item.status === 'draft' ? '待审核' : item.status === 'confirmed' ? '已发布' : '已停用或替换'} · v{item.version}</span><span className="muted">{item.source_name} · 审核：{item.reviewed_at ? new Date(item.reviewed_at).toLocaleString('zh-CN') : '未审核'} · {item.reviewed_by || '未具名'}</span></div>
+        <div className="flex flex-wrap gap-2 text-sm"><span className="pill">{item.categories?.name || '未分类'}</span><span className="pill">{item.source_level === 2 ? /演示|虚构/.test(item.source_name) ? '演示文件（虚构）' : '官方通知/文件来源' : item.source_level === 1 ? '老师确认回答' : '其他来源'}</span><span className={item.status === 'draft' ? 'pill pill-warning' : 'pill'}>{item.status === 'draft' ? '待审核' : item.status === 'confirmed' ? '已发布' : '已停用或替换'} · v{item.version}</span><span className="muted">{item.source_name} · 审核：{item.reviewed_at ? new Date(item.reviewed_at).toLocaleString('zh-CN') : '未审核'} · {item.reviewed_by || '未具名'}</span></div>
         <h3 className="font-semibold">{item.question}</h3><p className="whitespace-pre-wrap text-sm">{item.answer}</p>
         {item.source_url && <a href={item.source_url} target="_blank" rel="noreferrer" className="text-sm underline">查看来源</a>}
         <div className="flex flex-wrap gap-2">{item.status === 'draft' && <><button type="button" className="button-secondary" onClick={() => fill(item)}>编辑</button><button type="button" className="button-primary" disabled={saving} onClick={() => void act(item, 'publish')}>审核并发布</button></>}{item.status === 'confirmed' && <><button type="button" className="button-secondary" onClick={() => fill(item, true)}>创建替换草稿</button><button type="button" className="button-secondary" disabled={saving} onClick={() => void act(item, 'disable')}>停用新回答引用</button></>}<button type="button" className="button-quiet" onClick={() => void showHistory(item)}>查看版本</button></div>

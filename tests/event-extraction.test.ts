@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { resolveDeadline } from '../lib/event-date';
 import { parseEventExtraction } from '../lib/event-extraction';
+import { noticeAudience } from '../lib/notice-scope';
 
 describe('通知日期依据', () => {
+  it('保留原文明示的学园和年级范围，不把奖学金类别当成全校通用规则', () => {
+    const source = '各位云峰学园2025级同学：申请者原则上学业成绩排名前50%。';
+    const raw = JSON.stringify({ title: '奖学金申请', summary: '', eligibility: '申请者原则上学业成绩排名前50%。', deadline: null, deadline_source_text: null, submit_to: '', materials: [] });
+    expect(parseEventExtraction(raw, source, null, null).eligibility).toBe('各位云峰学园2025级同学。申请者原则上学业成绩排名前50%。');
+    expect(parseEventExtraction(raw.replace('申请者原则上', '云峰学园2025级同学，申请者原则上'), source, null, null).eligibility).toBe('云峰学园2025级同学，申请者原则上学业成绩排名前50%。');
+    expect(noticeAudience('请各位同学查看云峰学园通知。')).toBeNull();
+    expect(noticeAudience('某学院2026年10月13日')).toBeNull();
+  });
   it('原文不存在的日期句子会丢弃', () => {
     expect(resolveDeadline('请关注后续通知。', '截止2026年10月20日。', '2026-10-13').deadline).toBeNull();
   });
