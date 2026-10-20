@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   category_id TEXT REFERENCES categories(id),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'answered')),
   teacher_reply TEXT, sedimented INTEGER NOT NULL DEFAULT 0, knowledge_item_id TEXT REFERENCES knowledge_items(id),
+  knowledge_reply_version INTEGER, knowledge_reply_snapshot TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), answered_at TEXT
 );
 CREATE TABLE IF NOT EXISTS knowledge_item_versions (

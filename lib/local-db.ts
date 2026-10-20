@@ -231,12 +231,17 @@ class LocalDb {
           return { data: { status, id, title }, error: null };
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       }
-      if (name !== 'confirm_ticket_knowledge' && name !== 'confirm_ticket_knowledge_checked') throw new Error('unknown_rpc');
+      if (name === 'confirm_ticket_knowledge_checked') throw new Error('public_review_required');
+      if (name !== 'confirm_ticket_knowledge' && name !== 'confirm_ticket_knowledge_public_checked') throw new Error('unknown_rpc');
       this.db.exec('BEGIN IMMEDIATE');
       try {
         const ticket = this.db.prepare('SELECT * FROM tickets WHERE id = ?').get(params.p_ticket_id as string) as Row | undefined;
         if (!ticket) throw new Error('ticket_not_found');
-        if (name === 'confirm_ticket_knowledge_checked' && (ticket.reply_version !== params.p_expected_reply_version || ticket.teacher_reply !== params.p_expected_reply)) throw new Error('reply_version_conflict');
+        if (name === 'confirm_ticket_knowledge_public_checked') {
+          if (params.p_public_reviewed !== true || typeof params.p_actor !== 'string' || !params.p_actor.trim()) throw new Error('public_review_required');
+          if (!(params.p_public_excerpt === null || typeof params.p_public_excerpt === 'string') || String(params.p_public_excerpt ?? '').length > 4000) throw new Error('invalid_public_excerpt');
+          if (!Number.isSafeInteger(params.p_expected_reply_version) || Number(params.p_expected_reply_version) < 0 || ticket.reply_version !== params.p_expected_reply_version || ticket.teacher_reply !== params.p_expected_reply) throw new Error('reply_version_conflict');
+        }
         if (ticket.sedimented) throw new Error('already_sedimented');
         if (ticket.status !== 'answered' || !String(ticket.teacher_reply || '').trim()) throw new Error('ticket_not_answered');
         const categoryId = params.p_category_id as string;
@@ -251,7 +256,8 @@ class LocalDb {
         this.db.prepare("INSERT INTO knowledge_items (id,category_id,question,answer,source_level,source_name,status,supersedes,reviewed_at) VALUES (?,?,?,?,1,'老师确认回答','confirmed',?,?)")
           .run(id, categoryId, String(params.p_question).trim(), String(params.p_answer).trim(), previous ?? null, new Date().toISOString());
         if (previous) this.db.prepare("UPDATE knowledge_items SET status = 'superseded' WHERE id = ?").run(previous);
-        if (name === 'confirm_ticket_knowledge_checked') this.db.prepare('UPDATE knowledge_items SET reviewed_by=?,source_excerpt=? WHERE id=?').run(params.p_actor as string, ticket.teacher_reply as string, id);
+        if (name === 'confirm_ticket_knowledge_public_checked') this.db.prepare('UPDATE knowledge_items SET reviewed_by=?,source_excerpt=? WHERE id=?').run(params.p_actor as string, typeof params.p_public_excerpt === 'string' ? params.p_public_excerpt.trim() || null : null, id);
+        if (name === 'confirm_ticket_knowledge_public_checked') this.db.prepare('UPDATE tickets SET knowledge_reply_version=?,knowledge_reply_snapshot=? WHERE id=?').run(ticket.reply_version as number, ticket.teacher_reply as string, params.p_ticket_id as string);
         this.db.prepare('UPDATE tickets SET sedimented = 1, knowledge_item_id = ? WHERE id = ?').run(id, params.p_ticket_id as string);
         this.db.exec('COMMIT');
         return { data: id, error: null };
@@ -400,6 +406,8 @@ export function getLocalDb(): LocalDb {
   migrateKnowledge(db);
   const ticketColumns = (db.prepare('PRAGMA table_info(tickets)').all() as { name: string }[]).map(row => row.name);
   if (!ticketColumns.includes('reply_version')) db.exec('ALTER TABLE tickets ADD COLUMN reply_version INTEGER NOT NULL DEFAULT 0');
+  if (!ticketColumns.includes('knowledge_reply_version')) db.exec('ALTER TABLE tickets ADD COLUMN knowledge_reply_version INTEGER');
+  if (!ticketColumns.includes('knowledge_reply_snapshot')) db.exec('ALTER TABLE tickets ADD COLUMN knowledge_reply_snapshot TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS knowledge_import_draft_unique ON knowledge_items(import_draft_id) WHERE import_draft_id IS NOT NULL');
   migrateArticleMetadata(db, schema);
   const count = db.prepare('SELECT count(*) AS n FROM categories').get() as { n: number };

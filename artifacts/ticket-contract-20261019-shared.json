@@ -1,0 +1,14 @@
+{
+  "checked_at": "2026-10-20T00:00:35.354Z",
+  "database": "ujbflooavhhbtdezrteo",
+  "shared_writes": 0,
+  "reply_version_column_exists": true,
+  "sampled_tickets": 5,
+  "all_sampled_versions_valid": true,
+  "sampled_zero_versions": 5,
+  "legacy_checked_rpc_in_catalog": true,
+  "safe_public_rpc_in_catalog": false,
+  "linked_items_sampled": 0,
+  "linked_items_with_nonempty_excerpt_to_review": [],
+  "note": "Only latest 100 tickets sampled. No raw reply read or RPC executed. Historical versions/chat snapshots require the supplied read-only SQL audit."
+}

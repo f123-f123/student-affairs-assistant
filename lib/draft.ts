@@ -19,6 +19,7 @@ export function parseDraft(raw: string): Draft {
   // 常见数字身份标识直接移除；姓名及上下文仍由老师人工核对。
   const question = removeIdentifiers(value.question.trim());
   const answer = removeIdentifiers(value.answer.trim());
-  if (!question || !answer || question.length > 500 || answer.length > 4000) throw new Error('invalid_draft');
+  if (!question || !answer) throw new Error('draft_not_reusable');
+  if (question.length > 500 || answer.length > 4000) throw new Error('invalid_draft');
   return { question, answer };
 }
